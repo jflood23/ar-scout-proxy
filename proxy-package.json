@@ -1,0 +1,15 @@
+{
+  "name": "ar-scout-proxy",
+  "version": "1.0.0",
+  "description": "Chartex API proxy for A&R Scout",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
