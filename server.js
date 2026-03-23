@@ -4,49 +4,91 @@ app.use(express.json());
 
 const CHARTEX_BASE = "https://api.chartex.com/external/v1";
 
-// Allow requests from anywhere (Claude artifact, your own domain, etc.)
+// ── CORS ──────────────────────────────────────────────────────────────────────
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
 
-app.post("/chartex", async (req, res) => {
-  const { path, params } = req.body;
+// ── Chartex fetch helper ──────────────────────────────────────────────────────
+async function cx(path, params = {}) {
+  const appId    = process.env.CHARTEX_APP_ID;
+  const appToken = process.env.CHARTEX_APP_TOKEN;
+  const qs       = new URLSearchParams(params).toString();
+  const url      = `${CHARTEX_BASE}${path}${qs ? "?" + qs : ""}`;
+  const res      = await fetch(url, {
+    headers: { "X-APP-ID": appId, "X-APP-TOKEN": appToken },
+  });
+  if (!res.ok) throw new Error(`Chartex ${res.status} on ${path}`);
+  return res.json();
+}
 
-  // Credentials come from environment variables — never from the client
+// ── Health check ──────────────────────────────────────────────────────────────
+app.get("/", (_, res) => res.send("A&R Scout proxy — OK"));
+
+// ── Main scan endpoint ────────────────────────────────────────────────────────
+// POST /scan  { limit: 20 }
+// Does ALL Chartex calls server-side and returns enriched sounds array.
+app.post("/scan", async (req, res) => {
   const appId    = process.env.CHARTEX_APP_ID;
   const appToken = process.env.CHARTEX_APP_TOKEN;
 
   if (!appId || !appToken) {
-    return res.status(500).json({ error: "Server credentials not configured" });
+    return res.status(500).json({ error: "CHARTEX_APP_ID / CHARTEX_APP_TOKEN env vars not set on server" });
   }
 
-  if (!path || !path.startsWith("/tiktok-sounds")) {
-    return res.status(400).json({ error: "Invalid path" });
-  }
+  const limit = Math.min(parseInt(req.body?.limit) || 20, 100);
+  console.log(`[scan] Starting — limit=${limit}`);
 
+  // 1. Fetch trending sounds
+  let sounds;
   try {
-    const qs  = params ? "?" + new URLSearchParams(params).toString() : "";
-    const url = `${CHARTEX_BASE}${path}${qs}`;
-
-    const upstream = await fetch(url, {
-      headers: {
-        "X-APP-ID":    appId,
-        "X-APP-TOKEN": appToken,
-      },
+    const data = await cx("/tiktok-sounds/", {
+      sort_by: "tiktok_last_7_days_video_count",
+      country_codes: "US",
+      limit,
+      page: 1,
     });
-
-    const data = await upstream.json();
-    res.status(upstream.status).json(data);
-  } catch (err) {
-    res.status(502).json({ error: "Upstream fetch failed", detail: err.message });
+    sounds = data.results || data.data || (Array.isArray(data) ? data : []);
+    console.log(`[scan] Got ${sounds.length} sounds from Chartex`);
+  } catch (e) {
+    console.error("[scan] Chartex list error:", e.message);
+    return res.status(502).json({ error: "Failed to fetch sounds from Chartex", detail: e.message });
   }
+
+  // 2. Enrich each sound with metadata + influencers (in parallel batches of 5)
+  const enriched = [];
+  for (let i = 0; i < sounds.length; i += 5) {
+    const batch = sounds.slice(i, i + 5);
+    const results = await Promise.all(batch.map(async (s) => {
+      const sid = s.tiktok_sound_id || s.id;
+      let meta = null, influencers = null;
+      try { meta        = await cx(`/tiktok-sounds/${sid}/metadata/`); }        catch {}
+      try { influencers = await cx(`/tiktok-sounds/${sid}/influencer-statistics/`, { limit: 5 }); } catch {}
+      return {
+        tiktok_sound_id:              sid,
+        author_name:                  s.author_name  || s.artist_name || s.username || "",
+        title:                        s.title        || s.sound_title || s.name     || "",
+        tiktok_last_7_days_video_count: s.tiktok_last_7_days_video_count || 0,
+        tiktok_total_video_count:     s.tiktok_total_video_count || 0,
+        label:       meta?.label        || meta?.record_label || s.label || "",
+        spotify_track_id:  meta?.spotify_track_id  || s.spotify_track_id  || "",
+        spotify_artist_id: meta?.spotify_artist_id || s.spotify_artist_id || "",
+        top_influencers: influencers
+          ? (influencers.results || influencers || []).slice(0, 3)
+          : [],
+      };
+    }));
+    enriched.push(...results);
+    console.log(`[scan] Enriched ${Math.min(i + 5, sounds.length)}/${sounds.length}`);
+  }
+
+  console.log(`[scan] Done — returning ${enriched.length} enriched sounds`);
+  res.json({ sounds: enriched });
 });
 
-app.get("/", (_, res) => res.send("A&R Scout proxy — OK"));
-
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Proxy running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Proxy listening on port ${PORT}`));
