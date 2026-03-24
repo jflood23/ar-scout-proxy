@@ -102,13 +102,11 @@ async function getSpotifyData(trackId, artistName, trackName) {
       const foundArtist = sr && sr.artists && sr.artists.items && sr.artists.items[0] || null;
       if (foundArtist) {
         console.log("[spotify] artist search found: " + foundArtist.name);
-        const artistFull = await spFetch("/artists/" + foundArtist.id);
-        let topTracksRes = { tracks: [] };
-        try { topTracksRes = await spFetch("/artists/" + foundArtist.id + "/top-tracks?market=US"); } catch(e) {
-          console.log("[spotify] top-tracks skipped (path3): " + e.message);
-        }
-        const followerCount = (artistFull.followers && artistFull.followers.total != null)
-          ? artistFull.followers.total : null;
+        // Use search result directly — search returns full ArtistObject with followers/genres/popularity
+        // The separate /artists/{id} call returns SimplifiedArtistObject in Development Mode
+        const followerCount = (foundArtist.followers && foundArtist.followers.total != null)
+          ? foundArtist.followers.total : null;
+        console.log("[spotify] path3 using search result directly: followers=" + followerCount + " genres=" + (foundArtist.genres||[]).join(","));
         return {
           track_name:        null,
           track_popularity:  null,
@@ -116,13 +114,13 @@ async function getSpotifyData(trackId, artistName, trackName) {
           release_date:      null,
           album_type:        null,
           album_name:        null,
-          artist_id:         artistFull.id,
-          artist_name:       artistFull.name,
-          artist_url:        artistFull.external_urls && artistFull.external_urls.spotify,
+          artist_id:         foundArtist.id,
+          artist_name:       foundArtist.name,
+          artist_url:        foundArtist.external_urls && foundArtist.external_urls.spotify,
           followers:         followerCount,
-          artist_popularity: artistFull.popularity,
-          genres:            artistFull.genres || [],
-          top_track_names:   (topTracksRes.tracks || []).slice(0, 3).map(t => t.name),
+          artist_popularity: foundArtist.popularity,
+          genres:            foundArtist.genres || [],
+          top_track_names:   [],
         };
       }
     }
@@ -135,19 +133,28 @@ async function getSpotifyData(trackId, artistName, trackName) {
     if (!track.artists || !track.artists.length) return null;
 
     const primaryArtist = track.artists[0];
-    const artistFull = await spFetch("/artists/" + primaryArtist.id);
-    let topTracksRes = { tracks: [] };
-    try { topTracksRes = await spFetch("/artists/" + primaryArtist.id + "/top-tracks?market=US"); } catch(e) {
-      console.log("[spotify] top-tracks skipped: " + e.message);
+    // Search for artist by name to get full ArtistObject (includes followers/genres/popularity)
+    // /artists/{id} returns SimplifiedArtistObject in Spotify Development Mode
+    let artistData = null;
+    try {
+      const artistSearch = await spFetch("/search?q=" + encodeURIComponent(primaryArtist.name) + "&type=artist&limit=1&market=US");
+      artistData = artistSearch && artistSearch.artists && artistSearch.artists.items && artistSearch.artists.items[0] || null;
+    } catch(e) {
+      console.log("[spotify] artist search fallback failed: " + e.message);
     }
 
-    const followerCount = (artistFull.followers && artistFull.followers.total != null)
-      ? artistFull.followers.total : null;
+    const followerCount = artistData && artistData.followers && artistData.followers.total != null
+      ? artistData.followers.total : null;
+    const genres = artistData ? (artistData.genres || []) : [];
+    const artistPop = artistData ? artistData.popularity : null;
+    const artistUrl = artistData
+      ? (artistData.external_urls && artistData.external_urls.spotify)
+      : (primaryArtist.external_urls && primaryArtist.external_urls.spotify);
 
-    console.log("[spotify] got data for " + artistFull.name +
+    console.log("[spotify] got data for " + primaryArtist.name +
       " | followers=" + followerCount +
       " | label=" + (track.album && track.album.label || "none") +
-      " | genres=" + (artistFull.genres || []).slice(0, 2).join(", "));
+      " | genres=" + genres.slice(0, 2).join(", "));
 
     return {
       track_name:        track.name,
@@ -156,13 +163,13 @@ async function getSpotifyData(trackId, artistName, trackName) {
       release_date:      (track.album && track.album.release_date) || "",
       album_type:        (track.album && track.album.album_type) || "",
       album_name:        (track.album && track.album.name) || "",
-      artist_id:         artistFull.id,
-      artist_name:       artistFull.name,
-      artist_url:        artistFull.external_urls && artistFull.external_urls.spotify,
+      artist_id:         primaryArtist.id,
+      artist_name:       primaryArtist.name,
+      artist_url:        artistUrl,
       followers:         followerCount,
-      artist_popularity: artistFull.popularity,
-      genres:            artistFull.genres || [],
-      top_track_names:   (topTracksRes.tracks || []).slice(0, 3).map(t => t.name),
+      artist_popularity: artistPop,
+      genres:            genres,
+      top_track_names:   [],
     };
   } catch (e) {
     console.error("[spotify] FAILED for " + artistName + ": " + e.message);
@@ -209,7 +216,7 @@ function fmt(n) {
 
 // ── /version ──────────────────────────────────────────────────────────────────
 app.get("/version", (_, res) => res.json({
-  version:           "v14-raw-dump",
+  version:           "v15-search-for-full-data",
   anthropic_key_set: !!process.env.ANTHROPIC_API_KEY,
   chartex_key_set:   !!process.env.CHARTEX_APP_ID,
   spotify_key_set:   !!process.env.SPOTIFY_CLIENT_ID,
@@ -232,24 +239,28 @@ app.get("/spotify-test", async (req, res) => {
     if (!foundArtist) return res.json({ log, error: "artist not found" });
     log.push("found: " + foundArtist.name + " id=" + foundArtist.id);
 
-    // Full artist — dump raw object
-    const artistRaw = await spFetch("/artists/" + foundArtist.id);
-    log.push("raw artist keys: " + Object.keys(artistRaw).join(", "));
-    log.push("followers object: " + JSON.stringify(artistRaw.followers));
-    log.push("genres: " + JSON.stringify(artistRaw.genres));
-    log.push("popularity: " + artistRaw.popularity);
+    // Use search result directly for full data (followers/genres/popularity)
+    log.push("search result followers: " + JSON.stringify(foundArtist.followers));
+    log.push("search result genres: " + JSON.stringify(foundArtist.genres));
+    log.push("search result popularity: " + foundArtist.popularity);
 
-    // Top tracks — skip gracefully
-    let topTracks = [];
-    try {
-      const tr = await spFetch("/artists/" + foundArtist.id + "/top-tracks?market=US");
-      topTracks = (tr.tracks || []).slice(0, 3).map(t => t.name);
-      log.push("top tracks ok: " + topTracks.join(", "));
-    } catch(e) {
-      log.push("top-tracks skipped: " + e.message);
-    }
+    // Also test track lookup for label
+    log.push("searching for a track to get label...");
+    const trackSearch = await spFetch("/search?q=" + encodeURIComponent("Still Haven Cycle Syncing") + "&type=track&limit=1&market=US");
+    const foundTrack = trackSearch && trackSearch.tracks && trackSearch.tracks.items && trackSearch.tracks.items[0] || null;
+    log.push("track found: " + (foundTrack ? foundTrack.name + " | label=" + (foundTrack.album && foundTrack.album.label) : "none"));
 
-    res.json({ log, raw_artist: artistRaw, top_tracks: topTracks });
+    res.json({
+      log,
+      artist_from_search: {
+        name:       foundArtist.name,
+        followers:  foundArtist.followers,
+        genres:     foundArtist.genres,
+        popularity: foundArtist.popularity,
+        url:        foundArtist.external_urls && foundArtist.external_urls.spotify,
+      },
+      track_label: foundTrack && foundTrack.album && foundTrack.album.label,
+    });
   } catch (e) {
     res.json({ log, error: e.message });
   }
