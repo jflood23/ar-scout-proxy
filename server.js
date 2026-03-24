@@ -209,7 +209,7 @@ function fmt(n) {
 
 // ── /version ──────────────────────────────────────────────────────────────────
 app.get("/version", (_, res) => res.json({
-  version:           "v13-top-tracks-fix",
+  version:           "v14-raw-dump",
   anthropic_key_set: !!process.env.ANTHROPIC_API_KEY,
   chartex_key_set:   !!process.env.CHARTEX_APP_ID,
   spotify_key_set:   !!process.env.SPOTIFY_CLIENT_ID,
@@ -217,45 +217,41 @@ app.get("/version", (_, res) => res.json({
 
 app.get("/health", (_, res) => res.json({ status: "ok" }));
 
-// ── /spotify-test — trace exact getSpotifyData execution path ────────────────
+// ── /spotify-test — dump raw Spotify responses ───────────────────────────────
 app.get("/spotify-test", async (req, res) => {
   const log = [];
   try {
-    // Step 1: token
     log.push("getting token...");
     const token = await getSpotifyToken();
     log.push("token ok");
 
-    // Step 2: search for Still Haven (same as Path 3 in getSpotifyData)
+    // Search
     log.push("searching for Still Haven...");
-    const sr = await spFetch("/search?q=" + encodeURIComponent("Still Haven") + "&type=artist&limit=1&market=US");
-    log.push("search response keys: " + Object.keys(sr || {}).join(", "));
+    const sr = await spFetch("/search?q=Still+Haven&type=artist&limit=1&market=US");
     const foundArtist = sr && sr.artists && sr.artists.items && sr.artists.items[0] || null;
-    if (!foundArtist) { return res.json({ log, error: "no artist found in search" }); }
-    log.push("found artist: " + foundArtist.name + " id=" + foundArtist.id);
+    if (!foundArtist) return res.json({ log, error: "artist not found" });
+    log.push("found: " + foundArtist.name + " id=" + foundArtist.id);
 
-    // Step 3: full artist
-    log.push("fetching full artist...");
-    const artistFull = await spFetch("/artists/" + foundArtist.id);
-    log.push("artist followers: " + (artistFull.followers && artistFull.followers.total != null ? artistFull.followers.total : "undefined/null"));
-    log.push("artist genres: " + (artistFull.genres || []).join(", "));
+    // Full artist — dump raw object
+    const artistRaw = await spFetch("/artists/" + foundArtist.id);
+    log.push("raw artist keys: " + Object.keys(artistRaw).join(", "));
+    log.push("followers object: " + JSON.stringify(artistRaw.followers));
+    log.push("genres: " + JSON.stringify(artistRaw.genres));
+    log.push("popularity: " + artistRaw.popularity);
 
-    // Step 4: top tracks
-    log.push("fetching top tracks...");
-    const topTracksRes = await spFetch("/artists/" + foundArtist.id + "/top-tracks?market=US");
-    log.push("top tracks count: " + (topTracksRes.tracks || []).length);
+    // Top tracks — skip gracefully
+    let topTracks = [];
+    try {
+      const tr = await spFetch("/artists/" + foundArtist.id + "/top-tracks?market=US");
+      topTracks = (tr.tracks || []).slice(0, 3).map(t => t.name);
+      log.push("top tracks ok: " + topTracks.join(", "));
+    } catch(e) {
+      log.push("top-tracks skipped: " + e.message);
+    }
 
-    res.json({
-      log,
-      result: {
-        artist_name: artistFull.name,
-        followers:   artistFull.followers && artistFull.followers.total,
-        genres:      artistFull.genres,
-        top_tracks:  (topTracksRes.tracks || []).slice(0,3).map(t => t.name),
-      }
-    });
+    res.json({ log, raw_artist: artistRaw, top_tracks: topTracks });
   } catch (e) {
-    res.json({ log, error: e.message, stack: e.stack && e.stack.split("\n").slice(0,5) });
+    res.json({ log, error: e.message });
   }
 });
 
