@@ -1,4 +1,5 @@
-const express = require("express");
+const express  = require("express");
+const nodemailer = require("nodemailer");
 const path    = require("path");
 const app     = express();
 
@@ -49,12 +50,130 @@ function fmt(n) {
 }
 
 app.get("/version", (_, res) => res.json({
-  version: "v20-no-spotify",
+  version: "v21-seen-filter-email",
   anthropic_key_set: !!process.env.ANTHROPIC_API_KEY,
   chartex_key_set:   !!process.env.CHARTEX_APP_ID,
 }));
 
 app.get("/health", (_, res) => res.json({ status: "ok" }));
+
+// ── Seen artists persistence ──────────────────────────────────────────────────
+const fs         = require("fs");
+const SEEN_FILE  = "/tmp/ar_seen_artists.json";
+
+function loadSeen() {
+  try { return new Set(JSON.parse(fs.readFileSync(SEEN_FILE, "utf8"))); } catch (e) { return new Set(); }
+}
+function saveSeen(set) {
+  try { fs.writeFileSync(SEEN_FILE, JSON.stringify([...set])); } catch (e) { console.error("saveSeen failed:", e.message); }
+}
+
+// ── Email sender ──────────────────────────────────────────────────────────────
+function buildEmailHtml(artists) {
+  const d = new Date().toLocaleDateString("en-US", { weekday:"long", year:"numeric", month:"long", day:"numeric" });
+  const rows = artists.map(a => `
+    <div style="background:#0f0f1a;border:1px solid #1e1e2e;border-radius:8px;padding:24px;margin-bottom:20px;font-family:'Courier New',monospace;">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;">
+        <div>
+          <span style="color:#555;font-size:12px">#${a.rank}</span>
+          <h2 style="color:#e8e8f0;margin:4px 0 2px;font-size:18px;">${a.author_name}</h2>
+          <div style="color:#888;font-size:13px">"${a.title}"</div>
+          <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
+            ${(a.niche||"").split(",").map(n=>`<span style="background:#1a1a2e;color:#aaa;font-size:10px;padding:2px 7px;border-radius:3px">${n.trim()}</span>`).join("")}
+          </div>
+        </div>
+        <div style="text-align:right">
+          <div style="color:#c8ff00;font-size:22px;font-weight:700">${fmtN(a.tiktok_last_7_days_video_count)}</div>
+          <div style="color:#555;font-size:11px">videos / 7 days</div>
+          <div style="margin-top:4px;background:${{"hot":"#ff3d3d","growing":"#c8ff00","stable":"#f0a500","declining":"#555"}[a.tiktok_momentum]||"#555"};color:#000;font-size:9px;font-weight:700;padding:2px 7px;border-radius:3px;text-transform:uppercase;display:inline-block">${a.tiktok_momentum||""}</div>
+        </div>
+      </div>
+      <table style="width:100%;margin-top:14px;font-size:12px;border-collapse:collapse;font-family:'Courier New',monospace">
+        <tr><td style="color:#555;padding:3px 0;width:160px">All-time TikTok videos</td><td style="color:#bbb">${fmtN(a.tiktok_total_video_count)}</td></tr>
+        <tr><td style="color:#555;padding:3px 0">Total views</td><td style="color:#bbb">${fmtN(a.total_video_views)}</td></tr>
+        <tr><td style="color:#555;padding:3px 0">Total likes</td><td style="color:#bbb">${fmtN(a.total_video_likes)}</td></tr>
+        <tr><td style="color:#555;padding:3px 0">Label status</td><td style="color:#bbb">${a.label_assessment||""}</td></tr>
+      </table>
+      <div style="margin-top:14px;font-size:12px">
+        <div style="color:#c8ff00;font-size:10px;letter-spacing:1px;text-transform:uppercase;margin-bottom:6px">A&R Pitch</div>
+        <div style="color:#ccc;line-height:1.7">${a.pitch||""}</div>
+      </div>
+      <div style="margin-top:12px;font-size:12px">
+        <div style="color:#555;font-size:10px;letter-spacing:1px;text-transform:uppercase;margin-bottom:5px">Streaming Algo</div>
+        <div style="color:#888;font-style:italic;line-height:1.6">${a.algo_notes||""}</div>
+      </div>
+      <div style="margin-top:14px;font-size:12px">
+        ${a.tiktok_official_link ? `<a href="${a.tiktok_official_link}" style="color:#c8ff00;margin-right:12px">↗ TikTok Sound</a>` : ""}
+        ${a.spotify_link ? `<a href="${a.spotify_link}" style="color:#1db954">↗ Spotify Track</a>` : ""}
+      </div>
+    </div>`).join("");
+
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:0;background:#0a0a0f">
+  <div style="max-width:680px;margin:0 auto;padding:32px 20px;font-family:'Courier New',monospace;color:#e8e8f0">
+    <div style="border-bottom:1px solid #1e1e2e;padding-bottom:20px;margin-bottom:32px">
+      <div style="font-size:11px;color:#555;letter-spacing:2px;text-transform:uppercase;margin-bottom:4px">A&R Scout — Weekly Report</div>
+      <h1 style="color:#c8ff00;margin:0;font-size:24px">🎵 ${artists.length} Unsigned Artists</h1>
+      <div style="color:#555;font-size:12px;margin-top:6px">${d} · US TikTok · Under 50K total videos · Unsigned only</div>
+    </div>
+    ${rows}
+    <div style="border-top:1px solid #1e1e2e;padding-top:16px;margin-top:8px;font-size:10px;color:#333;letter-spacing:1px">
+      AUTO-GENERATED BY A&R SCOUT — CHARTEX × CLAUDE — EVERY MONDAY
+    </div>
+  </div>
+</body></html>`;
+}
+
+function fmtN(n) {
+  if (n == null) return "0";
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + "M";
+  if (n >= 1000)    return (n / 1000).toFixed(1) + "K";
+  return String(n);
+}
+
+async function sendEmail(artists) {
+  const gmailUser = process.env.GMAIL_ADDRESS;
+  const gmailPass = process.env.GMAIL_APP_PASSWORD;
+  const recipient = process.env.RECIPIENT_EMAIL || gmailUser;
+  if (!gmailUser || !gmailPass) throw new Error("GMAIL_ADDRESS or GMAIL_APP_PASSWORD not set");
+
+  const transporter = nodemailer.createTransport({
+    host: "smtp.gmail.com", port: 465, secure: true,
+    auth: { user: gmailUser, pass: gmailPass },
+  });
+
+  const d = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+  await transporter.sendMail({
+    from:    '"A&R Scout" <' + gmailUser + ">",
+    to:      recipient,
+    subject: "🎵 Weekly A&R Report — " + artists.length + " Unsigned Artists — " + d,
+    html:    buildEmailHtml(artists),
+  });
+  console.log("[email] sent to " + recipient + " with " + artists.length + " artists");
+}
+
+// ── /send-email ───────────────────────────────────────────────────────────────
+app.post("/send-email", async (req, res) => {
+  const { artists } = req.body || {};
+  if (!artists || !artists.length) return res.status(400).json({ error: "No artists provided" });
+  try {
+    await sendEmail(artists);
+    // Mark all as seen
+    const seen = loadSeen();
+    artists.forEach(a => { if (a.tiktok_sound_id) seen.add(a.tiktok_sound_id); });
+    saveSeen(seen);
+    res.json({ ok: true, sent: artists.length, message: "Email sent and artists marked as seen" });
+  } catch (e) {
+    console.error("[email] FAILED:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── /clear-seen ───────────────────────────────────────────────────────────────
+app.post("/clear-seen", (req, res) => {
+  saveSeen(new Set());
+  res.json({ ok: true, message: "Seen artists cleared" });
+});
 
 app.get("/debug", async (req, res) => {
   try {
@@ -70,7 +189,14 @@ app.post("/scan", async (req, res) => {
 
   let sounds;
   try {
-    const data = await cxGet("/tiktok-sounds/", { sort_by: "tiktok_last_7_days_video_count", country_codes: "US", limit, page: 1, label_categories: "OTHERS" });
+    const data = await cxGet("/tiktok-sounds/", {
+      sort_by:          "tiktok_last_7_days_video_count",
+      country_codes:    "US",
+      limit:            limit,
+      page:             1,
+      label_categories: "OTHERS",
+      max_video_count:  50000,   // exclude sounds already viral at massive scale
+    });
     sounds = (data.data && data.data.items) || [];
     console.log("[scan] " + sounds.length + " sounds");
   } catch (e) { return res.status(502).json({ error: e.message }); }
@@ -98,7 +224,12 @@ app.post("/scan", async (req, res) => {
     }));
     enriched.push(...rows);
   }
-  res.json({ sounds: enriched });
+  // Filter out previously seen artists
+  const seen = loadSeen();
+  const filtered = enriched.filter(s => !seen.has(s.tiktok_sound_id));
+  console.log("[scan] " + enriched.length + " total → " + filtered.length + " after seen filter (" + (enriched.length - filtered.length) + " skipped)");
+
+  res.json({ sounds: filtered });
 });
 
 app.post("/analyze", async (req, res) => {
