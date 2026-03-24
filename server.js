@@ -174,7 +174,7 @@ function fmt(n) {
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 app.get("/version", (_, res) => res.json({
-  version:           "v16-search-for-artist-data",
+  version:           "v17-raw-search-dump",
   anthropic_key_set: !!process.env.ANTHROPIC_API_KEY,
   chartex_key_set:   !!process.env.CHARTEX_APP_ID,
   spotify_key_set:   !!process.env.SPOTIFY_CLIENT_ID,
@@ -184,8 +184,20 @@ app.get("/health", (_, res) => res.json({ status: "ok" }));
 
 app.get("/spotify-test", async (req, res) => {
   try {
-    const result = await getSpotifyData(null, "Still Haven", "Cycle Syncing Frequency");
-    res.json({ result });
+    const token = await getSpotifyToken();
+    // Dump raw search response for artist
+    const raw = await fetch(SPOTIFY_BASE + "/search?q=Still+Haven&type=artist&limit=1&market=US", {
+      headers: { "Authorization": "Bearer " + token }
+    });
+    const data = await raw.json();
+    const artist = data.artists && data.artists.items && data.artists.items[0];
+    res.json({
+      raw_artist_keys: artist ? Object.keys(artist) : [],
+      followers_field: artist ? artist.followers : "missing",
+      genres_field:    artist ? artist.genres : "missing",
+      popularity:      artist ? artist.popularity : "missing",
+      full_artist:     artist || null,
+    });
   } catch (e) {
     res.json({ error: e.message });
   }
