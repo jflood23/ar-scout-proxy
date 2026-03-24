@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>A&R Scout</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #080810; color: #e0e0f0; font-family: 'Courier New', monospace; font-size: 13px; }
+  a { color: #c8ff00; text-decoration: none; }
+
+  .header { background: #0c0c18; border-bottom: 1px solid #1a1a30; padding: 16px 28px;
+    display: flex; align-items: center; gap: 12px; }
+  .header-title { color: #c8ff00; font-weight: 700; letter-spacing: 3px; font-size: 14px; text-transform: uppercase; }
+  .header-sub   { color: #333; font-size: 9px; letter-spacing: 1px; }
+  .header-actions { margin-left: auto; display: flex; gap: 8px; }
+
+  .btn      { border: none; border-radius: 4px; padding: 6px 14px; font-size: 10px;
+    font-family: 'Courier New', monospace; font-weight: 700; letter-spacing: 1px;
+    cursor: pointer; text-transform: uppercase; }
+  .btn-lime { background: #c8ff00; color: #080810; }
+  .btn-dark { background: #1a1a30; color: #aaa; border: 1px solid #2a2a40; }
+  .btn-save { background: #1a1a30; color: #c8ff00; border: 1px solid #2a2a50; flex: 1; }
+  .btn-run  { background: #c8ff00; color: #080810; width: 100%; padding: 13px;
+    font-size: 12px; letter-spacing: 2px; }
+
+  .config-wrap { max-width: 520px; margin: 40px auto; padding: 0 20px; }
+  .config-box  { background: #0c0c18; border: 1px solid #1a1a30; border-radius: 8px; padding: 34px 30px; }
+  .config-head { color: #c8ff00; font-size: 10px; letter-spacing: 2px; margin-bottom: 5px; }
+  .config-title { font-size: 19px; font-weight: 700; margin-bottom: 20px; line-height: 1.3; }
+  .field       { margin-top: 16px; }
+  .field label { display: block; font-size: 9px; color: #444; letter-spacing: 1.5px;
+    text-transform: uppercase; margin-bottom: 4px; }
+  .field input { width: 100%; background: #040409; border: 1px solid #1a1a30;
+    border-radius: 4px; padding: 8px 10px; color: #e0e0f0; font-size: 12px;
+    font-family: 'Courier New', monospace; outline: none; }
+  .narrow { width: 90px !important; }
+  .save-row { display: flex; align-items: center; gap: 10px; margin-top: 20px; }
+  .save-ok  { color: #00c48c; font-size: 10px; }
+  .divider  { height: 1px; background: #1a1a30; margin: 22px 0; }
+  .info-box { margin-top: 14px; background: #060610; border: 1px solid #141428;
+    border-radius: 5px; padding: 11px 13px; font-size: 9px; color: #444; line-height: 1.8; }
+
+  .run-wrap { max-width: 680px; margin: 32px auto; padding: 0 20px; }
+  .warn-banner { background: #130d00; border: 1px solid #2e1f00; border-radius: 6px;
+    padding: 10px 14px; margin-bottom: 18px; font-size: 10px; color: #c8800a; line-height: 1.8; }
+  .prog-info   { display: flex; justify-content: space-between; font-size: 10px; color: #555; margin-bottom: 5px; }
+  .prog-phase  { color: #c8ff00; letter-spacing: 1px; }
+  .prog-track  { height: 2px; background: #1a1a30; border-radius: 2px; }
+  .prog-fill   { height: 100%; background: #c8ff00; border-radius: 2px; transition: width 0.25s; width: 2%; }
+  .chips       { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 14px; min-height: 24px; }
+  .chip        { background: #091409; border: 1px solid #162816; color: #00c48c;
+    font-size: 9px; padding: 2px 7px; border-radius: 3px; }
+  .log-box     { background: #040409; border: 1px solid #1a1a30; border-radius: 6px;
+    padding: 14px 16px; height: 340px; overflow-y: auto; font-size: 10px; line-height: 2.1; }
+  .l-success { color: #c8ff00; }
+  .l-warn    { color: #c8800a; }
+  .l-error   { color: #ff4444; }
+  .l-muted   { color: #555; }
+  .l-info    { color: #555; }
+
+  .results-wrap { max-width: 840px; margin: 26px auto; padding: 0 20px; }
+  .results-hdr  { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+  .results-count { color: #c8ff00; font-size: 10px; letter-spacing: 2px; }
+  .results-line  { flex: 1; height: 1px; background: #1a1a30; }
+  .results-date  { font-size: 9px; color: #333; }
+  .card          { border-radius: 5px; overflow: hidden; margin-bottom: 8px; }
+  .card-row      { padding: 11px 16px; display: flex; align-items: center; gap: 11px;
+    cursor: pointer; user-select: none; }
+  .card-rank     { color: #2a2a2a; width: 20px; text-align: right; font-size: 10px; }
+  .card-info     { flex: 1; }
+  .card-name     { font-weight: 700; }
+  .card-track    { color: #444; font-size: 10px; margin-top: 1px; }
+  .niche-tags    { display: flex; gap: 3px; flex-wrap: wrap; }
+  .niche-tag     { background: #111122; color: #666; font-size: 8px; padding: 2px 5px; border-radius: 2px; }
+  .card-v7d      { text-align: right; min-width: 68px; }
+  .v7d-num       { color: #c8ff00; font-weight: 700; font-size: 13px; }
+  .v7d-lbl       { color: #333; font-size: 8px; }
+  .mdot          { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+  .chevron       { color: #333; font-size: 10px; }
+  .card-detail   { padding: 2px 16px 16px; border-top: 1px solid #111122; display: none; }
+  .card-detail.open { display: block; }
+  .detail-grid   { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 14px; }
+  .sec-label     { font-size: 8px; color: #333; letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 7px; }
+  .data-row      { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid #0d0d1c; }
+  .data-lbl      { font-size: 9px; color: #444; }
+  .data-val      { font-size: 10px; color: #999; max-width: 55%; text-align: right; }
+  .data-val.accent { color: #c8ff00; font-weight: 700; }
+  .data-val.sm   { font-size: 8px; }
+  .ext-links     { margin-top: 12px; display: flex; flex-direction: column; gap: 4px; }
+  .ext-link      { color: #c8ff00; font-size: 9px; }
+  .pitch-txt     { color: #bbb; font-size: 11px; line-height: 1.75; margin: 0 0 12px; }
+  .algo-txt      { color: #666; font-size: 10px; line-height: 1.65; font-style: italic; }
+
+  .email-wrap    { max-width: 720px; margin: 26px auto; padding: 0 20px; }
+  .email-label   { font-size: 10px; color: #c8ff00; letter-spacing: 2px; margin-bottom: 12px; }
+  .email-body    { background: #040409; border: 1px solid #1a1a30; border-radius: 6px;
+    padding: 20px 22px; font-size: 11px; line-height: 2.1; white-space: pre-wrap;
+    color: #999; max-height: 72vh; overflow-y: auto; }
+
+  .footer { padding: 16px 28px; border-top: 1px solid #0c0c18; margin-top: 48px;
+    font-size: 9px; color: #1a1a1a; letter-spacing: 1px; }
+
+  #view-running, #view-results, #view-email { display: none; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="header">
+    <span style="font-size:20px">🎵</span>
+    <div>
+      <div class="header-title">A&R Scout</div>
+      <div class="header-sub">UNSIGNED ARTIST DISCOVERY — CHARTEX × CLAUDE</div>
+    </div>
+    <div class="header-actions" id="header-actions"></div>
+  </div>
+
+  <div id="view-config">
+    <div class="config-wrap">
+      <div class="config-box">
+        <div class="config-head">WEEKLY RUN CONFIG</div>
+        <div class="config-title">Find Unsigned Artists<br>Trending on US TikTok</div>
+        <div class="field">
+          <label>Render Proxy URL</label>
+          <input id="inp-proxy" type="text" placeholder="https://ar-scout-proxy.onrender.com" />
+        </div>
+        <div style="font-size:9px;color:#444;margin-top:4px;line-height:1.7">
+          Chartex + Claude run server-side — credentials never touch the browser.
+        </div>
+        <div class="field">
+          <label>Sounds to scan (1–100 · 20 = quick test · 100 = full weekly run)</label>
+          <input id="inp-scan" type="number" class="narrow" value="20" min="1" max="100" />
+        </div>
+        <div class="save-row">
+          <button class="btn btn-save" onclick="saveConfig()">💾 Save</button>
+          <span id="save-ok" class="save-ok" style="display:none">✓ Saved</span>
+        </div>
+        <div class="divider"></div>
+        <button class="btn btn-run" onclick="runPipeline()">▶ RUN DISCOVERY PIPELINE</button>
+        <div class="info-box">
+          The proxy handles all API calls server-side. Make sure
+          <strong style="color:#666">ANTHROPIC_API_KEY</strong>,
+          <strong style="color:#666">CHARTEX_APP_ID</strong>, and
+          <strong style="color:#666">CHARTEX_APP_TOKEN</strong>
+          are set in your Render environment variables.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="view-running">
+    <div class="run-wrap">
+      <div id="warn-banner" class="warn-banner" style="display:none"></div>
+      <div class="prog-info">
+        <span class="prog-phase" id="prog-phase">Starting…</span>
+        <span id="prog-count">0/0</span>
+      </div>
+      <div class="prog-track"><div class="prog-fill" id="prog-fill"></div></div>
+      <br>
+      <div class="chips" id="chips"></div>
+      <div class="log-box" id="log-box"></div>
+    </div>
+  </div>
+
+  <div id="view-results">
+    <div class="results-wrap">
+      <div class="results-hdr">
+        <div class="results-count" id="results-count">0 UNSIGNED ARTISTS FOUND</div>
+        <div class="results-line"></div>
+        <div class="results-date" id="results-date"></div>
+      </div>
+      <div id="artist-list"></div>
+    </div>
+  </div>
+
+  <div id="view-email">
+    <div class="email-wrap">
+      <div class="email-label">EMAIL DRAFT — SENT AUTOMATICALLY EVERY MONDAY</div>
+      <div class="email-body" id="email-body"></div>
+    </div>
+  </div>
+
+  <div class="footer">A&R SCOUT — CHARTEX × CLAUDE — UNSIGNED ARTISTS ONLY — EVERY MONDAY VIA GITHUB ACTIONS</div>
+</div>
+
+<script>
+var STATE = {
+  proxyUrl: localStorage.getItem("ar_proxy") || "",
+  scanSize: localStorage.getItem("ar_scan")  || "20",
+  artists:  [],
+  email:    "",
+};
+
+var MCOLOR = { hot:"#ff3d3d", growing:"#c8ff00", stable:"#f0a500", declining:"#555" };
+
+// Init inputs from saved state
+document.getElementById("inp-proxy").value = STATE.proxyUrl;
+document.getElementById("inp-scan").value  = STATE.scanSize;
+
+function showView(name) {
+  ["config","running","results","email"].forEach(function(v) {
+    document.getElementById("view-" + v).style.display = v === name ? "block" : "none";
+  });
+  var ha = document.getElementById("header-actions");
+  if (name === "results") {
+    ha.innerHTML = '<button class="btn btn-dark" onclick="showView(\'config\')">← Config</button>' +
+                   '<button class="btn btn-lime" onclick="showView(\'email\')">📧 Email Preview</button>';
+  } else if (name === "email") {
+    ha.innerHTML = '<button class="btn btn-dark" onclick="showView(\'results\')">← Results</button>' +
+                   '<button class="btn btn-lime" id="copy-btn" onclick="copyEmail()">Copy Email</button>';
+  } else {
+    ha.innerHTML = "";
+  }
+}
+
+function saveConfig() {
+  STATE.proxyUrl = document.getElementById("inp-proxy").value.trim();
+  STATE.scanSize = document.getElementById("inp-scan").value;
+  localStorage.setItem("ar_proxy", STATE.proxyUrl);
+  localStorage.setItem("ar_scan",  STATE.scanSize);
+  var ok = document.getElementById("save-ok");
+  ok.style.display = "inline";
+  setTimeout(function() { ok.style.display = "none"; }, 2000);
+}
+
+function fmt(n) {
+  if (!n && n !== 0) return "—";
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + "M";
+  if (n >= 1000)    return (n / 1000).toFixed(1) + "K";
+  return String(n);
+}
+
+function esc(s) {
+  return String(s || "")
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;")
+    .replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+
+var logEl, progFill, progPhase, progCount, chipsEl;
+
+function initRunning() {
+  logEl     = document.getElementById("log-box");
+  progFill  = document.getElementById("prog-fill");
+  progPhase = document.getElementById("prog-phase");
+  progCount = document.getElementById("prog-count");
+  chipsEl   = document.getElementById("chips");
+  logEl.innerHTML = "";
+  chipsEl.innerHTML = "";
+  document.getElementById("warn-banner").style.display = "none";
+}
+
+function addLog(msg, type) {
+  var d = document.createElement("div");
+  d.className = "l-" + (type || "info");
+  d.textContent = msg;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setProgress(done, total, phase) {
+  progPhase.textContent = phase;
+  progCount.textContent = done + "/" + total;
+  progFill.style.width  = total ? (done / total * 100) + "%" : "2%";
+}
+
+function addChip(name) {
+  var s = document.createElement("span");
+  s.className   = "chip";
+  s.textContent = name;
+  chipsEl.appendChild(s);
+}
+
+function showWarn(msg) {
+  var b = document.getElementById("warn-banner");
+  b.innerHTML = msg;
+  b.style.display = "block";
+}
+
+async function runPipeline() {
+  STATE.proxyUrl = document.getElementById("inp-proxy").value.trim();
+  STATE.scanSize = document.getElementById("inp-scan").value;
+  if (!STATE.proxyUrl) { alert("Enter your Render proxy URL."); return; }
+
+  var limit = Math.max(1, Math.min(parseInt(STATE.scanSize) || 20, 100));
+  STATE.artists = [];
+
+  initRunning();
+  showView("running");
+  setProgress(0, 0, "Fetching sounds from Chartex…");
+
+  // Step 1: /scan
+  var sounds = [];
+  addLog("📡 Calling /scan on proxy…");
+  try {
+    var r1 = await fetch(STATE.proxyUrl.replace(/\/$/, "") + "/scan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ limit: limit }),
+    });
+    if (!r1.ok) throw new Error("/scan " + r1.status + ": " + await r1.text());
+    var d1 = await r1.json();
+    sounds = d1.sounds || [];
+    addLog("✅ Got " + sounds.length + " sounds from Chartex", "success");
+  } catch(e) {
+    showWarn("⚠️ <strong>/scan error:</strong> " + esc(e.message) + "<br>Check Render logs and make sure CHARTEX_APP_ID / CHARTEX_APP_TOKEN are set.");
+    addLog("⚠️ /scan failed: " + e.message, "warn");
+    showView("results");
+    renderResults();
+    return;
+  }
+
+  // Step 2: /analyze
+  addLog("🤖 Calling /analyze on proxy (Claude running server-side)…");
+  setProgress(0, sounds.length, "Claude analyzing…");
+  var analyzed = [];
+  try {
+    var r2 = await fetch(STATE.proxyUrl.replace(/\/$/, "") + "/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sounds: sounds }),
+    });
+    if (!r2.ok) throw new Error("/analyze " + r2.status + ": " + await r2.text());
+    var d2 = await r2.json();
+    analyzed = d2.results || [];
+    addLog("✅ Claude analyzed " + analyzed.length + " sounds", "success");
+  } catch(e) {
+    showWarn("⚠️ <strong>/analyze error:</strong> " + esc(e.message) + "<br>Check Render logs and make sure ANTHROPIC_API_KEY is set.");
+    addLog("⚠️ /analyze failed: " + e.message, "warn");
+    analyzed = sounds.map(function(s) {
+      return Object.assign({}, s, { is_unsigned: true, label_assessment: "Unverified", niche: "indie",
+        pitch: s.author_name + " is trending.", tiktok_momentum: "growing", algo_notes: "Review manually." });
+    });
+  }
+
+  // Step 3: display
+  for (var i = 0; i < analyzed.length; i++) {
+    var a = analyzed[i];
+    setProgress(i + 1, analyzed.length, "Processing: " + a.author_name);
+    if (!a.is_unsigned) {
+      addLog("  ↳ SIGNED: " + a.author_name + " — " + a.label_assessment, "muted");
+      continue;
+    }
+    addLog("  ✅ UNSIGNED — " + a.author_name + " | " + a.niche + " | " + a.label_assessment, "success");
+    STATE.artists.push({
+      rank:   STATE.artists.length + 1,
+      artist: a.author_name,
+      track:  a.title,
+      v7d:    a.tiktok_last_7_days_video_count,
+      vTotal: a.tiktok_total_video_count,
+      label:  a.label_assessment,
+      niche:  a.niche,
+      pitch:  a.pitch,
+      momentum: a.tiktok_momentum,
+      algo:   a.algo_notes,
+      tiktokUrl:  a.tiktok_official_link || null,
+      spotifyUrl: a.spotify_id ? "https://open.spotify.com/track/" + a.spotify_id : null,
+    });
+    addChip(a.author_name);
+  }
+
+  addLog("\n🎯 Done — " + STATE.artists.length + " unsigned artists found.", "success");
+  STATE.email = buildEmail(STATE.artists);
+  document.getElementById("email-body").textContent = STATE.email;
+  renderResults();
+  showView("results");
+}
+
+function renderResults() {
+  document.getElementById("results-count").textContent = STATE.artists.length + " UNSIGNED ARTISTS FOUND";
+  document.getElementById("results-date").textContent  =
+    new Date().toLocaleDateString("en-US", { month:"short", day:"numeric", year:"numeric" });
+
+  if (!STATE.artists.length) {
+    document.getElementById("artist-list").innerHTML =
+      '<div style="text-align:center;padding:60px 0;color:#333">No unsigned artists found in this scan.</div>';
+    return;
+  }
+
+  var html = STATE.artists.map(function(a) {
+    var mc   = MCOLOR[a.momentum] || "#444";
+    var tags = (a.niche || "").split(",").slice(0,2)
+      .map(function(n) { return '<span class="niche-tag">' + esc(n.trim()) + '</span>'; }).join("");
+    var links = "";
+    if (a.tiktokUrl)  links += '<a class="ext-link" href="' + esc(a.tiktokUrl)  + '" target="_blank">↗ TikTok Sound</a>';
+    if (a.spotifyUrl) links += '<a class="ext-link" href="' + esc(a.spotifyUrl) + '" target="_blank">↗ Spotify Track</a>';
+    return (
+      '<div class="card" id="card-' + a.rank + '" style="background:#07070e;border:1px solid #111122">' +
+        '<div class="card-row" onclick="toggleCard(' + a.rank + ')">' +
+          '<div class="card-rank">#' + a.rank + '</div>' +
+          '<div class="card-info">' +
+            '<div class="card-name">' + esc(a.artist) + '</div>' +
+            '<div class="card-track">"' + esc(a.track) + '"</div>' +
+          '</div>' +
+          '<div class="niche-tags">' + tags + '</div>' +
+          '<div class="card-v7d"><div class="v7d-num">' + fmt(a.v7d) + '</div><div class="v7d-lbl">7d videos</div></div>' +
+          '<div class="mdot" style="background:' + mc + '"></div>' +
+          '<div class="chevron" id="chev-' + a.rank + '">▼</div>' +
+        '</div>' +
+        '<div class="card-detail" id="det-' + a.rank + '">' +
+          '<div class="detail-grid">' +
+            '<div>' +
+              '<div class="sec-label">Chartex Data</div>' +
+              '<div class="data-row"><span class="data-lbl">7-day videos</span><span class="data-val accent">' + fmt(a.v7d) + '</span></div>' +
+              '<div class="data-row"><span class="data-lbl">All-time</span><span class="data-val">' + fmt(a.vTotal) + '</span></div>' +
+              '<div class="data-row"><span class="data-lbl">Momentum</span><span class="data-val" style="color:' + mc + '">' + esc((a.momentum||"").toUpperCase()) + '</span></div>' +
+              '<div class="data-row"><span class="data-lbl">Label status</span><span class="data-val sm">' + esc(a.label) + '</span></div>' +
+              '<div class="ext-links">' + links + '</div>' +
+            '</div>' +
+            '<div>' +
+              '<div class="sec-label">A&R Pitch</div>' +
+              '<p class="pitch-txt">' + esc(a.pitch) + '</p>' +
+              '<div class="sec-label">Streaming Algo</div>' +
+              '<p class="algo-txt">' + esc(a.algo) + '</p>' +
+            '</div>' +
+          '</div>' +
+        '</div>' +
+      '</div>'
+    );
+  }).join("");
+
+  document.getElementById("artist-list").innerHTML = html;
+}
+
+function toggleCard(rank) {
+  var det  = document.getElementById("det-" + rank);
+  var chev = document.getElementById("chev-" + rank);
+  var card = document.getElementById("card-" + rank);
+  var open = det.classList.contains("open");
+  det.classList.toggle("open", !open);
+  chev.textContent       = open ? "▼" : "▲";
+  card.style.background  = open ? "#07070e" : "#0b0b1a";
+  card.style.borderColor = open ? "#111122" : "#252540";
+}
+
+function buildEmail(list) {
+  var d = new Date().toLocaleDateString("en-US",
+    { weekday:"long", year:"numeric", month:"long", day:"numeric" });
+  var t = "Subject: 🎵 Weekly A&R Report — " + list.length + " Unsigned Artists — " + d + "\n\n";
+  t += "Hi team,\n\nThis week's scout found " + list.length + " unsigned artists with strong US TikTok momentum.\n\n";
+  t += "─".repeat(48) + "\n\n";
+  list.forEach(function(a) {
+    t += "#" + a.rank + " — " + a.artist + "\n";
+    t += "Track: \"" + a.track + "\"\n";
+    t += "Niche: " + a.niche + "\n";
+    t += "Momentum: " + (a.momentum || "").toUpperCase() + "\n\n";
+    t += "  TikTok 7-day videos: " + fmt(a.v7d) + "\n";
+    t += "  TikTok all-time:     " + fmt(a.vTotal) + "\n";
+    t += "  Label status:        " + a.label + "\n\n";
+    if (a.tiktokUrl)  t += "🔗 TikTok:         " + a.tiktokUrl  + "\n";
+    if (a.spotifyUrl) t += "🎧 Spotify Track:  " + a.spotifyUrl + "\n";
+    t += "\n💡 Pitch:\n" + a.pitch + "\n\n";
+    t += "📈 Algo:\n" + a.algo + "\n\n";
+    t += "─".repeat(48) + "\n\n";
+  });
+  t += "Auto-generated by A&R Scout — Chartex × Claude — every Monday.\n";
+  return t;
+}
+
+function copyEmail() {
+  navigator.clipboard.writeText(STATE.email).then(function() {
+    var btn = document.getElementById("copy-btn");
+    if (btn) { btn.textContent = "Copied!"; setTimeout(function() { btn.textContent = "Copy Email"; }, 2000); }
+  });
+}
+
+showView("config");
+</script>
+</body>
+</html>
