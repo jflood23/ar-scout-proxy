@@ -2,9 +2,8 @@ const express = require("express");
 const app = express();
 app.use(express.json());
 
-const CHARTEX_BASE = "https://api.chartex.com/external/v1";
+const BASE = "https://api.chartex.com/external/v1";
 
-// ── CORS ──────────────────────────────────────────────────────────────────────
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -13,102 +12,93 @@ app.use((req, res, next) => {
   next();
 });
 
-// ── Chartex helper ────────────────────────────────────────────────────────────
-async function cx(apiPath, params = {}) {
-  const appId    = process.env.CHARTEX_APP_ID;
-  const appToken = process.env.CHARTEX_APP_TOKEN;
-  const qs       = new URLSearchParams(params).toString();
-  const url      = `${CHARTEX_BASE}${apiPath}${qs ? "?" + qs : ""}`;
-  const res      = await fetch(url, {
-    headers: { "X-APP-ID": appId, "X-APP-TOKEN": appToken },
-  });
-  if (!res.ok) throw new Error(`Chartex ${res.status} on ${apiPath}`);
+function headers() {
+  return { "X-APP-ID": process.env.CHARTEX_APP_ID, "X-APP-TOKEN": process.env.CHARTEX_APP_TOKEN };
+}
+
+async function cxGet(path, params) {
+  const qs  = params ? "?" + new URLSearchParams(params).toString() : "";
+  const res = await fetch(BASE + path + qs, { headers: headers() });
+  if (!res.ok) throw new Error("Chartex " + res.status + " on " + path);
   return res.json();
 }
 
-// ── Health ────────────────────────────────────────────────────────────────────
+// ── /health ───────────────────────────────────────────────────────────────────
 app.get("/health", (_, res) => res.json({ status: "ok" }));
 
-// ── Debug: see raw Chartex response ──────────────────────────────────────────
+// ── /debug  — paste response here to diagnose field names ────────────────────
 app.get("/debug", async (req, res) => {
-  const appId    = process.env.CHARTEX_APP_ID;
-  const appToken = process.env.CHARTEX_APP_TOKEN;
-  if (!appId || !appToken)
-    return res.status(500).json({ error: "Env vars not set" });
   try {
-    const qs  = new URLSearchParams({ sort_by:"tiktok_last_7_days_video_count", country_codes:"US", limit:3, page:1 }).toString();
-    const url = `${CHARTEX_BASE}/tiktok-sounds/?${qs}`;
-    const r   = await fetch(url, { headers:{ "X-APP-ID":appId, "X-APP-TOKEN":appToken }});
-    const raw = await r.json();
-    // Also grab metadata for first sound
-    const sounds = raw.results || raw.data || (Array.isArray(raw) ? raw : []);
+    const list   = await cxGet("/tiktok-sounds/", { sort_by:"tiktok_last_7_days_video_count", country_codes:"US", limit:3, page:1 });
+    const sounds = list.results || list.data || (Array.isArray(list) ? list : []);
+    const first  = sounds[0] || null;
     let meta = null;
-    if (sounds[0]) {
-      const sid = sounds[0].tiktok_sound_id || sounds[0].id;
-      const mr  = await fetch(`${CHARTEX_BASE}/tiktok-sounds/${sid}/metadata/`, {
-        headers:{ "X-APP-ID":appId, "X-APP-TOKEN":appToken }
-      });
-      meta = await mr.json();
+    if (first) {
+      const sid = first.tiktok_sound_id || first.id;
+      try { meta = await cxGet("/tiktok-sounds/" + sid + "/metadata/"); } catch(e) { meta = { error: e.message }; }
     }
-    res.json({ raw_list_response: raw, first_sound_keys: sounds[0] ? Object.keys(sounds[0]) : [], first_sound_sample: sounds[0] || null, first_sound_metadata: meta });
+    res.json({
+      top_level_keys:    Object.keys(list),
+      sound_count:       sounds.length,
+      first_sound_keys:  first ? Object.keys(first) : [],
+      first_sound:       first,
+      first_sound_meta:  meta,
+    });
   } catch(e) {
     res.status(502).json({ error: e.message });
   }
 });
 
-
-
-// ── Scan ──────────────────────────────────────────────────────────────────────
+// ── /scan ─────────────────────────────────────────────────────────────────────
 app.post("/scan", async (req, res) => {
-  const appId    = process.env.CHARTEX_APP_ID;
-  const appToken = process.env.CHARTEX_APP_TOKEN;
-  if (!appId || !appToken)
-    return res.status(500).json({ error: "CHARTEX_APP_ID / CHARTEX_APP_TOKEN not set" });
-
-  const limit = Math.min(parseInt(req.body?.limit) || 20, 100);
-  console.log(`[scan] limit=${limit}`);
+  if (!process.env.CHARTEX_APP_ID) return res.status(500).json({ error: "CHARTEX_APP_ID not set" });
+  const limit = Math.min(parseInt(req.body && req.body.limit) || 20, 100);
+  console.log("[scan] limit=" + limit);
 
   let sounds;
   try {
-    const data = await cx("/tiktok-sounds/", {
-      sort_by: "tiktok_last_7_days_video_count",
-      country_codes: "US", limit, page: 1,
-    });
+    const data = await cxGet("/tiktok-sounds/", { sort_by:"tiktok_last_7_days_video_count", country_codes:"US", limit, page:1 });
     sounds = data.results || data.data || (Array.isArray(data) ? data : []);
-    console.log(`[scan] ${sounds.length} sounds`);
-  } catch (e) {
+    console.log("[scan] " + sounds.length + " sounds from Chartex");
+  } catch(e) {
     return res.status(502).json({ error: e.message });
   }
 
   const enriched = [];
   for (let i = 0; i < sounds.length; i += 5) {
     const batch = sounds.slice(i, i + 5);
-    const rows = await Promise.all(batch.map(async (s) => {
+    const rows  = await Promise.all(batch.map(async function(s) {
       const sid = s.tiktok_sound_id || s.id;
       let meta = null, inf = null;
-      try { meta = await cx(`/tiktok-sounds/${sid}/metadata/`); }                       catch {}
-      try { inf  = await cx(`/tiktok-sounds/${sid}/influencer-statistics/`, {limit:5}); } catch {}
+      try { meta = await cxGet("/tiktok-sounds/" + sid + "/metadata/"); } catch(e) {}
+      try { inf  = await cxGet("/tiktok-sounds/" + sid + "/influencer-statistics/", { limit:5 }); } catch(e) {}
+      console.log("[scan] raw sound keys:", Object.keys(s).join(", "));
+      if (meta) console.log("[scan] raw meta keys:", Object.keys(meta).join(", "));
       return {
         tiktok_sound_id:                sid,
         author_name:                    s.author_name  || s.artist_name || s.username || "",
         title:                          s.title        || s.sound_title || s.name     || "",
         tiktok_last_7_days_video_count: s.tiktok_last_7_days_video_count || 0,
         tiktok_total_video_count:       s.tiktok_total_video_count || 0,
-        label:             meta?.label || meta?.record_label || s.label || "",
-        spotify_track_id:  meta?.spotify_track_id  || s.spotify_track_id  || "",
-        spotify_artist_id: meta?.spotify_artist_id || s.spotify_artist_id || "",
-        top_influencers:   inf ? (inf.results || inf || []).slice(0, 3) : [],
+        // pass ALL label-related fields so we can see what exists
+        label:              s.label || "",
+        label_name:         s.label_name || "",
+        record_label:       s.record_label || "",
+        meta_label:         (meta && (meta.label || meta.label_name || meta.record_label)) || "",
+        meta_raw:           meta || {},
+        spotify_track_id:   (meta && meta.spotify_track_id)  || s.spotify_track_id  || "",
+        spotify_artist_id:  (meta && meta.spotify_artist_id) || s.spotify_artist_id || "",
+        top_influencers:    inf ? (inf.results || inf || []).slice(0,3) : [],
       };
     }));
     enriched.push(...rows);
-    console.log(`[scan] enriched ${Math.min(i+5,sounds.length)}/${sounds.length}`);
   }
 
   res.json({ sounds: enriched });
 });
 
-// ── Serve the app UI (inlined — no public/ folder needed) ─────────────────────
-const APP_HTML = `<!DOCTYPE html>
+// ── App UI (inlined) ──────────────────────────────────────────────────────────
+const HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -689,9 +679,9 @@ showView("config");
 `;
 
 app.get("*", (req, res) => {
-  res.setHeader("Content-Type", "text/html");
-  res.send(APP_HTML);
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.send(HTML);
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Listening on ${PORT}`));
+app.listen(PORT, function() { console.log("Listening on " + PORT); });
