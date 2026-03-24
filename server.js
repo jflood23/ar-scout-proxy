@@ -49,7 +49,7 @@ function fmt(n) {
 }
 
 app.get("/version", (_, res) => res.json({
-  version: "v29-real-total-count",
+  version: "v30-log-counts",
   anthropic_key_set: !!process.env.ANTHROPIC_API_KEY,
   resend_key_set:    !!process.env.RESEND_API_KEY,
   chartex_key_set:   !!process.env.CHARTEX_APP_ID,
@@ -217,13 +217,15 @@ app.post("/scan", async (req, res) => {
       }
     }));
 
-    // Filter: under 50k all-time creates (real number from stats endpoint)
+    // Log distribution before filtering
+    withRealCounts.forEach(s => console.log("  [count] " + s.tiktok_sound_creator_name + " real_total=" + s.real_total_creates));
+
+    // Filter: under 50k all-time creates
     sounds = withRealCounts
-      .filter(s => s.real_total_video_count > 0 && s.real_total_video_count < 50000)
+      .filter(s => s.real_total_creates > 0 && s.real_total_creates <= 50000)
       .slice(0, limit);
 
     console.log("[scan] " + sounds.length + " sounds after 50k all-time creates filter");
-    sounds.forEach(s => console.log("  " + s.tiktok_sound_creator_name + " real_total=" + s.real_total_creates));
   } catch (e) { return res.status(502).json({ error: e.message }); }
 
   const enriched = [];
