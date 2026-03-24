@@ -174,7 +174,7 @@ function fmt(n) {
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 app.get("/version", (_, res) => res.json({
-  version:           "v17-raw-search-dump",
+  version:           "v18-direct-artist-test",
   anthropic_key_set: !!process.env.ANTHROPIC_API_KEY,
   chartex_key_set:   !!process.env.CHARTEX_APP_ID,
   spotify_key_set:   !!process.env.SPOTIFY_CLIENT_ID,
