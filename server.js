@@ -25,12 +25,13 @@ async function cxGet(path, params) {
 
 // ── /health ───────────────────────────────────────────────────────────────────
 app.get("/health", (_, res) => res.json({ status: "ok" }));
+app.get("/version", (_, res) => res.json({ version: "v4-correct-fields", fields: ["tiktok_name_of_sound","tiktok_sound_creator_name","label_name","tiktok_official_link"] }));
 
 // ── /debug  — paste response here to diagnose field names ────────────────────
 app.get("/debug", async (req, res) => {
   try {
     const list   = await cxGet("/tiktok-sounds/", { sort_by:"tiktok_last_7_days_video_count", country_codes:"US", limit:3, page:1 });
-    const sounds = list.results || list.data || (Array.isArray(list) ? list : []);
+    const sounds = (list.data && list.data.items) || list.results || (Array.isArray(list) ? list : []);
     const first  = sounds[0] || null;
     let meta = null;
     if (first) {
@@ -58,7 +59,8 @@ app.post("/scan", async (req, res) => {
   let sounds;
   try {
     const data = await cxGet("/tiktok-sounds/", { sort_by:"tiktok_last_7_days_video_count", country_codes:"US", limit, page:1 });
-    sounds = data.results || data.data || (Array.isArray(data) ? data : []);
+    // Real Chartex response shape: { data: { items: [...] } }
+    sounds = (data.data && data.data.items) || data.results || (Array.isArray(data) ? data : []);
     console.log("[scan] " + sounds.length + " sounds from Chartex");
   } catch(e) {
     return res.status(502).json({ error: e.message });
@@ -68,30 +70,25 @@ app.post("/scan", async (req, res) => {
   for (let i = 0; i < sounds.length; i += 5) {
     const batch = sounds.slice(i, i + 5);
     const rows  = await Promise.all(batch.map(async function(s) {
-      const sid = s.tiktok_sound_id || s.id;
-      let meta = null, inf = null;
-      try { meta = await cxGet("/tiktok-sounds/" + sid + "/metadata/"); } catch(e) {}
-      try { inf  = await cxGet("/tiktok-sounds/" + sid + "/influencer-statistics/", { limit:5 }); } catch(e) {}
-      console.log("[scan] raw sound keys:", Object.keys(s).join(", "));
-      if (meta) console.log("[scan] raw meta keys:", Object.keys(meta).join(", "));
+      const sid = s.tiktok_sound_id;
+      let inf = null;
+      try { inf = await cxGet("/tiktok-sounds/" + sid + "/influencer-statistics/", { limit:5 }); } catch(e) {}
       return {
         tiktok_sound_id:                sid,
-        author_name:                    s.author_name  || s.artist_name || s.username || "",
-        title:                          s.title        || s.sound_title || s.name     || "",
+        author_name:                    s.tiktok_sound_creator_name || s.tiktok_sound_creator_username || "",
+        title:                          s.tiktok_name_of_sound || "",
         tiktok_last_7_days_video_count: s.tiktok_last_7_days_video_count || 0,
         tiktok_total_video_count:       s.tiktok_total_video_count || 0,
-        // pass ALL label-related fields so we can see what exists
-        label:              s.label || "",
-        label_name:         s.label_name || "",
-        record_label:       s.record_label || "",
-        meta_label:         (meta && (meta.label || meta.label_name || meta.record_label)) || "",
-        meta_raw:           meta || {},
-        spotify_track_id:   (meta && meta.spotify_track_id)  || s.spotify_track_id  || "",
-        spotify_artist_id:  (meta && meta.spotify_artist_id) || s.spotify_artist_id || "",
-        top_influencers:    inf ? (inf.results || inf || []).slice(0,3) : [],
+        label_name:                     s.label_name || "",
+        artists:                        s.artists || "",
+        song_name:                      s.song_name || "",
+        tiktok_official_link:           s.tiktok_official_link || "",
+        spotify_id:                     s.spotify_id || "",
+        top_influencers:                inf ? (inf.data && inf.data.items ? inf.data.items : (inf.results || inf || [])).slice(0,3) : [],
       };
     }));
     enriched.push(...rows);
+    console.log("[scan] enriched batch ending at " + Math.min(i+5, sounds.length));
   }
 
   res.json({ sounds: enriched });
@@ -498,32 +495,36 @@ async function askClaude(prompt) {
 }
 
 function buildPrompt(s) {
-  const inf = s.top_influencers?.length ? JSON.stringify(s.top_influencers) : "none";
-  const labelLine = s.label ? \`Label/Distributor field: "\${s.label}"\` : "Label/Distributor field: (empty — no label data from Chartex)";
-  return \`You are an A&R scout. Your job is to find UNSIGNED artists on TikTok.
+  const label   = s.label_name || "";
+  const artists = s.artists    || "";
+  const inf     = s.top_influencers && s.top_influencers.length ? JSON.stringify(s.top_influencers) : "none";
+  const labelLine  = label   ? "Label from Chartex: \"" + label   + "\""    : "Label from Chartex: null (no label data)";
+  const artistLine = artists ? "Artists on sound: \"" + artists + "\"" : "Artists on sound: (none listed)";
+  return \`You are an A&R scout finding UNSIGNED artists trending on TikTok.
 
-Artist: \${s.author_name}
-Track: "\${s.title}"
+Sound: "\${s.title}"
+Creator: \${s.author_name}
+\${artistLine}
 \${labelLine}
 TikTok videos last 7 days: \${fmt(s.tiktok_last_7_days_video_count)}
 TikTok videos all time: \${fmt(s.tiktok_total_video_count)}
-Top influencers using sound: \${inf}
+Top influencers using this sound: \${inf}
 
-IMPORTANT RULES:
-- If the label field is EMPTY or missing, the artist is almost certainly UNSIGNED. Set is_unsigned: true.
-- Only set is_unsigned: false if the label field EXPLICITLY contains a known major or notable indie:
-  \${SIGNED}
-- These are DISTRIBUTORS not labels (= unsigned): \${DISTROS}
-- When in doubt, lean toward is_unsigned: true. False negatives (missing a signed artist) are better than false positives (rejecting an unsigned one).
+RULES:
+1. label null/empty = is_unsigned true (no deal detected)
+2. label is a known major/notable indie = is_unsigned false. Known labels: \${SIGNED}
+3. label is a distributor only = is_unsigned true. Distributors: \${DISTROS}
+4. Small unknown production name with no other evidence = is_unsigned true
+5. DEFAULT TO TRUE when uncertain — better to over-include than miss real talent
 
-Reply ONLY with valid JSON, no markdown fences:
+Reply ONLY with valid JSON, no markdown:
 {
   "is_unsigned": true or false,
-  "label_assessment": "one sentence: what label/distro was detected, or 'No label data — likely unsigned'",
+  "label_assessment": "one sentence on what you found",
   "niche": "2-4 genre/niche tags comma separated",
-  "pitch": "3-4 sentence A&R pitch covering TikTok virality, streaming potential, niche, audience fit",
+  "pitch": "3-4 sentence A&R pitch: TikTok traction, streaming potential, niche, audience",
   "tiktok_momentum": "hot or growing or stable or declining",
-  "algo_notes": "1-2 sentences on Spotify algo opportunities (Discover Weekly, Release Radar, editorial)"
+  "algo_notes": "1-2 sentences on Spotify algo opportunities"
 }\`;
 }
 
