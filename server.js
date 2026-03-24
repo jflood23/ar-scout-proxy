@@ -138,7 +138,8 @@ async function cxGet(apiPath, params) {
 }
 
 // ── Claude ────────────────────────────────────────────────────────────────────
-async function askClaude(prompt) {
+async function askClaude(prompt, attempt) {
+  attempt = attempt || 1;
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -153,6 +154,13 @@ async function askClaude(prompt) {
     }),
   });
   const d = await res.json();
+  // Retry on 500/529 (overloaded/server error) with exponential backoff
+  if ((res.status === 500 || res.status === 529) && attempt <= 4) {
+    const delay = Math.pow(2, attempt) * 1000;
+    console.log("[claude] " + res.status + " on attempt " + attempt + " — retrying in " + delay + "ms");
+    await new Promise(r => setTimeout(r, delay));
+    return askClaude(prompt, attempt + 1);
+  }
   if (!res.ok) throw new Error("Claude " + res.status + ": " + JSON.stringify(d));
   return (d.content || []).map(b => b.text || "").join("");
 }
@@ -166,7 +174,7 @@ function fmt(n) {
 
 // ── /version ──────────────────────────────────────────────────────────────────
 app.get("/version", (_, res) => res.json({
-  version:           "v8-spec-compliant",
+  version:           "v9-retries",
   anthropic_key_set: !!process.env.ANTHROPIC_API_KEY,
   chartex_key_set:   !!process.env.CHARTEX_APP_ID,
   spotify_key_set:   !!process.env.SPOTIFY_CLIENT_ID,
@@ -197,9 +205,14 @@ app.post("/scan", async (req, res) => {
 
   let sounds;
   try {
+    // label_categories=OTHERS filters out UMG/SMG/WMG/BMG/BIG_INDIE at the Chartex level
+    // before we spend any Claude credits — first line of defense per API docs
     const data = await cxGet("/tiktok-sounds/", {
-      sort_by: "tiktok_last_7_days_video_count",
-      country_codes: "US", limit: limit, page: 1,
+      sort_by:          "tiktok_last_7_days_video_count",
+      country_codes:    "US",
+      limit:            limit,
+      page:             1,
+      label_categories: "OTHERS",
     });
     sounds = (data.data && data.data.items) || [];
     console.log("[scan] " + sounds.length + " sounds from Chartex");
