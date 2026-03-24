@@ -1,5 +1,4 @@
 const express  = require("express");
-const nodemailer = require("nodemailer");
 const path    = require("path");
 const app     = express();
 
@@ -50,8 +49,9 @@ function fmt(n) {
 }
 
 app.get("/version", (_, res) => res.json({
-  version: "v21-seen-filter-email",
+  version: "v22-resend-email",
   anthropic_key_set: !!process.env.ANTHROPIC_API_KEY,
+  resend_key_set:    !!process.env.RESEND_API_KEY,
   chartex_key_set:   !!process.env.CHARTEX_APP_ID,
 }));
 
@@ -132,24 +132,26 @@ function fmtN(n) {
 }
 
 async function sendEmail(artists) {
-  const gmailUser = process.env.GMAIL_ADDRESS;
-  const gmailPass = process.env.GMAIL_APP_PASSWORD;
-  const recipient = process.env.RECIPIENT_EMAIL || gmailUser;
-  if (!gmailUser || !gmailPass) throw new Error("GMAIL_ADDRESS or GMAIL_APP_PASSWORD not set");
+  const apiKey   = process.env.RESEND_API_KEY;
+  const from     = process.env.RESEND_FROM    || "A&R Scout <onboarding@resend.dev>";
+  const to       = process.env.RECIPIENT_EMAIL;
+  if (!apiKey)   throw new Error("RESEND_API_KEY not set in Render env vars");
+  if (!to)       throw new Error("RECIPIENT_EMAIL not set in Render env vars");
 
-  const transporter = nodemailer.createTransport({
-    host: "smtp.gmail.com", port: 465, secure: true,
-    auth: { user: gmailUser, pass: gmailPass },
+  const d = new Date().toLocaleDateString("en-US", { month:"long", day:"numeric", year:"numeric" });
+  const res = await fetch("https://api.resend.com/emails", {
+    method:  "POST",
+    headers: { "Authorization": "Bearer " + apiKey, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      from:    from,
+      to:      [to],
+      subject: "🎵 Weekly A&R Report — " + artists.length + " Unsigned Artists — " + d,
+      html:    buildEmailHtml(artists),
+    }),
   });
-
-  const d = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
-  await transporter.sendMail({
-    from:    '"A&R Scout" <' + gmailUser + ">",
-    to:      recipient,
-    subject: "🎵 Weekly A&R Report — " + artists.length + " Unsigned Artists — " + d,
-    html:    buildEmailHtml(artists),
-  });
-  console.log("[email] sent to " + recipient + " with " + artists.length + " artists");
+  const d2 = await res.json();
+  if (!res.ok) throw new Error("Resend " + res.status + ": " + JSON.stringify(d2));
+  console.log("[email] sent via Resend to " + to + " | id=" + d2.id);
 }
 
 // ── /send-email ───────────────────────────────────────────────────────────────
