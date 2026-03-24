@@ -7,7 +7,7 @@ app.use(express.static(path.join(__dirname, "public")));
 
 const CHARTEX_BASE  = "https://api.chartex.com/external/v1";
 const SPOTIFY_BASE  = "https://api.spotify.com/v1";
-const SPOTIFY_TOKEN = "https://accounts.spotify.com/api/token";
+const SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token";
 
 const SIGNED  = "UMG, Universal Music Group, Sony Music, Columbia Records, Atlantic Records, Warner Music, Warner Bros Records, BMG, Interscope, Republic Records, Capitol Records, RCA Records, Island Records, Epic Records, Virgin Music, Parlophone, Polydor, Mercury Records, Def Jam, Cash Money, Young Money, Roc Nation, TDE, Top Dawg Entertainment, Aftermath, Bad Boy Records, Motown, 300 Entertainment, Kobalt, Concord, Secretly Group, Beggars Group, Epitaph, Sub Pop, Merge Records, Ninja Tune, Warp Records";
 const DISTROS = "DistroKid, TuneCore, CD Baby, Amuse, United Masters, ONErpm, Stem, Soundrop, Fresh Tunes";
@@ -20,126 +20,161 @@ app.use((req, res, next) => {
   next();
 });
 
-// ── Spotify: Client Credentials token (public catalog data only, no scopes) ──
-// Per spec: POST /token with grant_type=client_credentials
-// Client Secret stays server-side only, never exposed to browser
-let _spotifyToken  = null;
-let _spotifyExpiry = 0;
+// ── Spotify: Client Credentials (public catalog, no user scopes needed) ──────
+let _spToken  = null;
+let _spExpiry = 0;
 
 async function getSpotifyToken() {
-  if (_spotifyToken && Date.now() < _spotifyExpiry) return _spotifyToken;
+  if (_spToken && Date.now() < _spExpiry) return _spToken;
   const creds = Buffer.from(
     process.env.SPOTIFY_CLIENT_ID + ":" + process.env.SPOTIFY_CLIENT_SECRET
   ).toString("base64");
-  const res = await fetch(SPOTIFY_TOKEN, {
+  const res = await fetch(SPOTIFY_TOKEN_URL, {
     method:  "POST",
-    headers: {
-      "Authorization": "Basic " + creds,
-      "Content-Type":  "application/x-www-form-urlencoded",
-    },
-    body: "grant_type=client_credentials",
+    headers: { "Authorization": "Basic " + creds, "Content-Type": "application/x-www-form-urlencoded" },
+    body:    "grant_type=client_credentials",
   });
   const d = await res.json();
   if (!res.ok) throw new Error("Spotify auth " + res.status + ": " + (d.error_description || d.error));
-  _spotifyToken  = d.access_token;
-  _spotifyExpiry = Date.now() + (d.expires_in - 60) * 1000;
-  return _spotifyToken;
+  _spToken  = d.access_token;
+  _spExpiry = Date.now() + (d.expires_in - 60) * 1000;
+  console.log("[spotify] token refreshed");
+  return _spToken;
 }
 
-// ── Spotify fetch with 429 retry + exponential backoff ───────────────────────
-// Per spec: respect Retry-After header on 429
-async function spotifyFetch(endpoint, attempt) {
+// Fetch with 429 backoff per Retry-After header
+async function spFetch(endpoint, attempt) {
   attempt = attempt || 1;
   const token = await getSpotifyToken();
   const res   = await fetch(SPOTIFY_BASE + endpoint, {
     headers: { "Authorization": "Bearer " + token },
   });
-
   if (res.status === 429 && attempt <= 3) {
-    const retryAfter = parseInt(res.headers.get("Retry-After") || "2");
-    const delay      = Math.max(retryAfter * 1000, Math.pow(2, attempt) * 500);
-    console.log("[spotify] 429 on " + endpoint + " — retrying in " + delay + "ms");
-    await new Promise(r => setTimeout(r, delay));
-    return spotifyFetch(endpoint, attempt + 1);
+    const wait = Math.max(parseInt(res.headers.get("Retry-After") || "2") * 1000, Math.pow(2, attempt) * 500);
+    console.log("[spotify] 429 — waiting " + wait + "ms before retry " + (attempt + 1));
+    await new Promise(r => setTimeout(r, wait));
+    return spFetch(endpoint, attempt + 1);
   }
-
-  if (res.status === 401) {
-    // Token expired mid-session — clear and retry once
-    _spotifyToken = null;
-    if (attempt <= 2) return spotifyFetch(endpoint, attempt + 1);
-    throw new Error("Spotify 401: token refresh failed");
+  if (res.status === 401 && attempt <= 2) {
+    _spToken = null; // force token refresh
+    return spFetch(endpoint, attempt + 1);
   }
-
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error("Spotify " + res.status + ": " + (err.error && err.error.message || "unknown"));
+    const e = await res.json().catch(() => ({}));
+    throw new Error("Spotify " + res.status + " on " + endpoint + ": " + ((e.error && e.error.message) || "unknown"));
   }
-
   return res.json();
 }
 
-// ── Spotify: get track + artist data ─────────────────────────────────────────
-// Endpoints used per OpenAPI spec:
-//   GET /tracks/{id}   → TrackObject: album.label, album.release_date, album.album_type, popularity, artists[]
-//   GET /artists/{id}  → ArtistObject: followers.total, genres[], popularity
-//   GET /artists/{id}/top-tracks?market=US → tracks[].name
-async function getSpotifyData(trackId) {
-  if (!trackId || !process.env.SPOTIFY_CLIENT_ID) return null;
+// GET /tracks/{id} → album.label, artists[0].id, popularity, album.release_date
+// GET /artists/{id} → followers.total, genres[], popularity
+// GET /artists/{id}/top-tracks?market=US → tracks[].name
+// If no trackId, fall back to GET /search?q=artist+track&type=track to find it
+async function getSpotifyData(trackId, artistName, trackName) {
+  if (!process.env.SPOTIFY_CLIENT_ID) {
+    console.log("[spotify] SPOTIFY_CLIENT_ID not set — skipping");
+    return null;
+  }
+
   try {
-    // GET /tracks/{id} — per spec, market is optional for public data
-    const track = await spotifyFetch("/tracks/" + trackId);
+    let track = null;
 
-    if (!track || !track.artists || !track.artists.length) return null;
+    // Path 1: direct track lookup by Spotify ID
+    if (trackId) {
+      console.log("[spotify] fetching track " + trackId);
+      track = await spFetch("/tracks/" + trackId);
+    }
 
-    const primaryArtist = track.artists[0]; // SimplifiedArtistObject from TrackObject
+    // Path 2: search if no ID or track fetch failed
+    if (!track && artistName && trackName) {
+      const q  = encodeURIComponent("artist:" + artistName + " track:" + trackName);
+      console.log("[spotify] searching: " + artistName + " — " + trackName);
+      const sr = await spFetch("/search?q=" + q + "&type=track&limit=1&market=US");
+      track = sr && sr.tracks && sr.tracks.items && sr.tracks.items[0] || null;
+      if (track) console.log("[spotify] search found: " + track.name + " by " + (track.artists[0] && track.artists[0].name));
+    }
 
-    // GET /artists/{id} — full ArtistObject with followers + genres
-    // GET /artists/{id}/top-tracks — requires market per spec
+    // Path 3: search by artist name only if track search failed
+    if (!track && artistName) {
+      const q  = encodeURIComponent(artistName);
+      console.log("[spotify] artist-only search: " + artistName);
+      const sr = await spFetch("/search?q=" + q + "&type=artist&limit=1&market=US");
+      const foundArtist = sr && sr.artists && sr.artists.items && sr.artists.items[0] || null;
+      if (foundArtist) {
+        console.log("[spotify] artist search found: " + foundArtist.name);
+        const [artistFull, topTracksRes] = await Promise.all([
+          spFetch("/artists/" + foundArtist.id),
+          spFetch("/artists/" + foundArtist.id + "/top-tracks?market=US"),
+        ]);
+        return {
+          track_name:        null,
+          track_popularity:  null,
+          label:             null, // no track, so no album.label
+          release_date:      null,
+          album_type:        null,
+          album_name:        null,
+          artist_id:         artistFull.id,
+          artist_name:       artistFull.name,
+          artist_url:        artistFull.external_urls && artistFull.external_urls.spotify,
+          followers:         artistFull.followers.total,
+          artist_popularity: artistFull.popularity,
+          genres:            artistFull.genres || [],
+          top_track_names:   (topTracksRes.tracks || []).slice(0, 3).map(t => t.name),
+        };
+      }
+    }
+
+    if (!track) {
+      console.log("[spotify] no track found for: " + artistName);
+      return null;
+    }
+
+    if (!track.artists || !track.artists.length) return null;
+
+    const primaryArtist = track.artists[0];
     const [artistFull, topTracksRes] = await Promise.all([
-      spotifyFetch("/artists/" + primaryArtist.id),
-      spotifyFetch("/artists/" + primaryArtist.id + "/top-tracks?market=US"),
+      spFetch("/artists/" + primaryArtist.id),
+      spFetch("/artists/" + primaryArtist.id + "/top-tracks?market=US"),
     ]);
 
+    console.log("[spotify] got data for " + artistFull.name +
+      " | followers=" + artistFull.followers.total +
+      " | label=" + (track.album && track.album.label || "none") +
+      " | genres=" + (artistFull.genres || []).slice(0, 2).join(", "));
+
     return {
-      // From TrackObject
-      track_name:      track.name,
-      track_popularity: track.popularity,            // integer 0-100
-      label:           track.album.label || "",       // label on the album
-      release_date:    track.album.release_date || "",
-      album_type:      track.album.album_type || "",  // "album" | "single" | "compilation"
-      album_name:      track.album.name || "",
-      // From ArtistObject
-      artist_id:       artistFull.id,
-      artist_name:     artistFull.name,
-      artist_url:      artistFull.external_urls.spotify,
-      followers:       artistFull.followers.total,   // integer
-      artist_popularity: artistFull.popularity,      // integer 0-100
-      genres:          artistFull.genres || [],       // string[]
-      // From top-tracks
-      top_track_names: (topTracksRes.tracks || []).slice(0, 3).map(t => t.name),
+      track_name:        track.name,
+      track_popularity:  track.popularity,
+      label:             (track.album && track.album.label) || "",
+      release_date:      (track.album && track.album.release_date) || "",
+      album_type:        (track.album && track.album.album_type) || "",
+      album_name:        (track.album && track.album.name) || "",
+      artist_id:         artistFull.id,
+      artist_name:       artistFull.name,
+      artist_url:        artistFull.external_urls && artistFull.external_urls.spotify,
+      followers:         artistFull.followers.total,
+      artist_popularity: artistFull.popularity,
+      genres:            artistFull.genres || [],
+      top_track_names:   (topTracksRes.tracks || []).slice(0, 3).map(t => t.name),
     };
   } catch (e) {
-    console.error("[spotify] getSpotifyData failed for track " + trackId + ": " + e.message);
+    console.error("[spotify] FAILED for " + artistName + ": " + e.message);
     return null;
   }
 }
 
-// ── Chartex fetch ─────────────────────────────────────────────────────────────
+// ── Chartex ───────────────────────────────────────────────────────────────────
 async function cxGet(apiPath, params) {
   const qs  = params ? "?" + new URLSearchParams(params).toString() : "";
   const res = await fetch(CHARTEX_BASE + apiPath + qs, {
-    headers: {
-      "X-APP-ID":    process.env.CHARTEX_APP_ID,
-      "X-APP-TOKEN": process.env.CHARTEX_APP_TOKEN,
-    },
+    headers: { "X-APP-ID": process.env.CHARTEX_APP_ID, "X-APP-TOKEN": process.env.CHARTEX_APP_TOKEN },
   });
   if (!res.ok) throw new Error("Chartex " + res.status + " on " + apiPath);
   return res.json();
 }
 
 // ── Claude ────────────────────────────────────────────────────────────────────
-async function askClaude(prompt, attempt) {
-  attempt = attempt || 1;
+async function askClaude(prompt) {
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -154,13 +189,6 @@ async function askClaude(prompt, attempt) {
     }),
   });
   const d = await res.json();
-  // Retry on 500/529 (overloaded/server error) with exponential backoff
-  if ((res.status === 500 || res.status === 529) && attempt <= 4) {
-    const delay = Math.pow(2, attempt) * 1000;
-    console.log("[claude] " + res.status + " on attempt " + attempt + " — retrying in " + delay + "ms");
-    await new Promise(r => setTimeout(r, delay));
-    return askClaude(prompt, attempt + 1);
-  }
   if (!res.ok) throw new Error("Claude " + res.status + ": " + JSON.stringify(d));
   return (d.content || []).map(b => b.text || "").join("");
 }
@@ -174,24 +202,31 @@ function fmt(n) {
 
 // ── /version ──────────────────────────────────────────────────────────────────
 app.get("/version", (_, res) => res.json({
-  version:           "v9-retries",
+  version:           "v10-spotify-search-fallback",
   anthropic_key_set: !!process.env.ANTHROPIC_API_KEY,
   chartex_key_set:   !!process.env.CHARTEX_APP_ID,
   spotify_key_set:   !!process.env.SPOTIFY_CLIENT_ID,
 }));
 
-// ── /health ───────────────────────────────────────────────────────────────────
 app.get("/health", (_, res) => res.json({ status: "ok" }));
 
 // ── /debug ────────────────────────────────────────────────────────────────────
 app.get("/debug", async (req, res) => {
   try {
     const list   = await cxGet("/tiktok-sounds/", {
-      sort_by: "tiktok_last_7_days_video_count",
-      country_codes: "US", limit: 3, page: 1,
+      sort_by: "tiktok_last_7_days_video_count", country_codes: "US", limit: 3, page: 1,
     });
     const sounds = (list.data && list.data.items) || [];
-    res.json({ sound_count: sounds.length, first_sound: sounds[0] || null });
+    // Also test Spotify
+    let spotifyTest = null;
+    if (sounds[0] && sounds[0].tiktok_sound_creator_name) {
+      spotifyTest = await getSpotifyData(
+        sounds[0].spotify_id,
+        sounds[0].tiktok_sound_creator_name,
+        sounds[0].tiktok_name_of_sound
+      );
+    }
+    res.json({ sound_count: sounds.length, first_sound: sounds[0] || null, spotify_test: spotifyTest });
   } catch (e) {
     res.status(502).json({ error: e.message });
   }
@@ -205,8 +240,6 @@ app.post("/scan", async (req, res) => {
 
   let sounds;
   try {
-    // label_categories=OTHERS filters out UMG/SMG/WMG/BMG/BIG_INDIE at the Chartex level
-    // before we spend any Claude credits — first line of defense per API docs
     const data = await cxGet("/tiktok-sounds/", {
       sort_by:          "tiktok_last_7_days_video_count",
       country_codes:    "US",
@@ -215,7 +248,7 @@ app.post("/scan", async (req, res) => {
       label_categories: "OTHERS",
     });
     sounds = (data.data && data.data.items) || [];
-    console.log("[scan] " + sounds.length + " sounds from Chartex");
+    console.log("[scan] " + sounds.length + " sounds after OTHERS label filter");
   } catch (e) {
     return res.status(502).json({ error: e.message });
   }
@@ -238,8 +271,7 @@ app.post("/scan", async (req, res) => {
         song_name:                      s.song_name || "",
         tiktok_official_link:           s.tiktok_official_link || "",
         spotify_id:                     s.spotify_id || "",
-        top_influencers: inf && inf.data && inf.data.items
-          ? inf.data.items.slice(0, 3) : [],
+        top_influencers: inf && inf.data && inf.data.items ? inf.data.items.slice(0, 3) : [],
       };
     }));
     enriched.push(...rows);
@@ -258,16 +290,16 @@ app.post("/analyze", async (req, res) => {
   const results = [];
 
   for (const s of sounds) {
-    // Pull Spotify data using spec-compliant endpoints
-    const sp = await getSpotifyData(s.spotify_id);
+    // Spotify: try direct ID first, then search by artist+track name
+    const sp = await getSpotifyData(s.spotify_id, s.author_name, s.title);
 
-    // Spotify album.label is the most reliable source for label info
-    const spotifyLabel   = sp ? sp.label : "";
+    const spotifyLabel   = sp && sp.label ? sp.label : "";
     const chartexLabel   = s.label_name || "";
     const effectiveLabel = spotifyLabel || chartexLabel || "";
     const followers      = sp ? sp.followers : null;
     const genres         = sp ? sp.genres : [];
     const popularity     = sp ? sp.artist_popularity : null;
+    const trackPop       = sp ? sp.track_popularity : null;
     const releaseDate    = sp ? sp.release_date : "";
     const albumType      = sp ? sp.album_type : "";
     const topTracks      = sp ? sp.top_track_names : [];
@@ -276,57 +308,62 @@ app.post("/analyze", async (req, res) => {
       ? JSON.stringify(s.top_influencers) : "none";
 
     const prompt =
-      "You are a senior A&R scout. Analyze this TikTok-trending sound.\n\n" +
+      "You are a senior A&R scout at an independent label. Analyze this TikTok-trending sound.\n\n" +
       "TIKTOK DATA:\n" +
       "  Sound: \"" + s.title + "\"\n" +
       "  Creator: " + s.author_name + "\n" +
       "  Artists credited: " + (s.artists || "none") + "\n" +
-      "  Videos created this week: " + fmt(s.tiktok_last_7_days_video_count) + "\n" +
-      "  Videos all time: " + fmt(s.tiktok_total_video_count) + "\n" +
+      "  New videos this week: " + fmt(s.tiktok_last_7_days_video_count) + "\n" +
+      "  Total videos all time: " + fmt(s.tiktok_total_video_count) + "\n" +
       "  Top influencers using sound: " + inf + "\n\n" +
-      "SPOTIFY DATA (from Spotify API):\n" +
-      "  Track: \"" + (sp ? sp.track_name : "not on Spotify") + "\"\n" +
-      "  Label on Spotify: " + (effectiveLabel || "none listed") + "\n" +
-      "  Artist followers: " + (followers != null ? fmt(followers) : "not on Spotify") + "\n" +
-      "  Artist popularity (0-100): " + (popularity != null ? popularity : "n/a") + "\n" +
-      "  Track popularity (0-100): " + (sp ? sp.track_popularity : "n/a") + "\n" +
-      "  Genres: " + (genres.length ? genres.join(", ") : "none listed") + "\n" +
+      "SPOTIFY DATA:\n" +
+      "  Label on Spotify album: " + (effectiveLabel || "NOT FOUND — no Spotify presence or no label listed") + "\n" +
+      "  Artist followers: " + (followers != null ? fmt(followers) : "not found on Spotify") + "\n" +
+      "  Artist popularity score (0-100): " + (popularity != null ? popularity : "n/a") + "\n" +
+      "  Track popularity score (0-100): " + (trackPop != null ? trackPop : "n/a") + "\n" +
+      "  Genres: " + (genres.length ? genres.join(", ") : "not found") + "\n" +
       "  Release date: " + (releaseDate || "unknown") + "\n" +
       "  Release type: " + (albumType || "unknown") + "\n" +
-      "  Other top tracks: " + (topTracks.length ? topTracks.join(", ") : "none") + "\n\n" +
-      "SIGNING STATUS RULES:\n" +
-      "  Mark is_unsigned FALSE if label matches: " + SIGNED + "\n" +
-      "  Mark is_unsigned TRUE if label is a distributor: " + DISTROS + "\n" +
-      "  Mark is_unsigned TRUE if label is null/empty or a small unknown production co\n" +
-      "  Mark is_unsigned TRUE when uncertain — err toward inclusion\n\n" +
-      "PITCH RULES — write specifically, not generically:\n" +
-      "  - Reference the actual video count and growth trajectory\n" +
-      "  - Reference actual Spotify follower count and what it means for deal leverage\n" +
-      "  - Name the specific genre/subgenre and its current market moment\n" +
-      "  - Explain why NOW is the right time (early enough to add value, big enough to be real)\n" +
-      "  - Do NOT write phrases like 'has shown impressive growth' or 'worth monitoring'\n\n" +
-      "ALGO NOTES RULES — be specific:\n" +
-      "  - Name actual Spotify playlist targets based on the genre\n" +
-      "  - Reference the follower-to-popularity gap if notable (signals algorithmic upside)\n" +
-      "  - Mention Release Radar / Discover Weekly eligibility based on release recency\n\n" +
-      "Reply ONLY with this JSON, no markdown, no extra text:\n" +
-      "{\"is_unsigned\":true,\"label_assessment\":\"exact label or reason unsigned\",\"niche\":\"2-4 specific subgenre tags\",\"pitch\":\"3-4 sentences with real data\",\"tiktok_momentum\":\"hot|growing|stable|declining\",\"algo_notes\":\"specific playlists and algo angles\"}";
+      "  Other top tracks: " + (topTracks.length ? topTracks.join(", ") : "none found") + "\n\n" +
+      "STEP 1 — SIGNING STATUS:\n" +
+      "Set is_unsigned to FALSE if the Spotify label matches any of these:\n" +
+      SIGNED + "\n\n" +
+      "Set is_unsigned to TRUE if:\n" +
+      "- Label is a distributor only (" + DISTROS + ")\n" +
+      "- Label is null/empty/not found\n" +
+      "- Label is a small unknown production company\n" +
+      "- Artist is not on Spotify at all\n" +
+      "- When uncertain, default to TRUE\n\n" +
+      "STEP 2 — WRITE THE PITCH (only if is_unsigned is true):\n" +
+      "Write 3-4 sentences that are specific and data-driven. You must:\n" +
+      "- State the exact weekly video count and what the velocity signals\n" +
+      "- Reference the Spotify follower count and what it means for deal leverage\n" +
+      "- Name the specific subgenre and why it is commercially relevant right now\n" +
+      "- Explain why this is the right moment to approach (early but proven)\n" +
+      "Do NOT write: 'has shown impressive growth', 'worth monitoring', 'is trending'\n\n" +
+      "STEP 3 — ALGO NOTES (only if is_unsigned is true):\n" +
+      "Write 2 sentences naming:\n" +
+      "- Specific Spotify editorial playlists this artist could realistically land based on their genre\n" +
+      "- Whether the follower/popularity gap signals strong algorithmic upside\n\n" +
+      "Reply ONLY with this exact JSON, no markdown, no extra text:\n" +
+      "{\"is_unsigned\":true,\"label_assessment\":\"exact label name found, or explanation of why unsigned\",\"niche\":\"2-4 specific subgenre tags separated by commas\",\"pitch\":\"your specific data-driven pitch here\",\"tiktok_momentum\":\"hot or growing or stable or declining\",\"algo_notes\":\"your specific playlist and algo notes here\"}";
 
     let analysis;
     try {
       const raw   = await askClaude(prompt);
       const clean = raw.replace(/```json|```/g, "").trim();
       const match = clean.match(/\{[\s\S]*\}/);
-      if (!match) throw new Error("No JSON object in Claude response: " + clean.slice(0, 300));
+      if (!match) throw new Error("No JSON in response: " + clean.slice(0, 200));
       analysis = JSON.parse(match[0]);
-      if (typeof analysis.is_unsigned !== "boolean") throw new Error("is_unsigned not boolean: " + analysis.is_unsigned);
+      if (typeof analysis.is_unsigned !== "boolean") throw new Error("is_unsigned not boolean");
     } catch (e) {
-      console.error("[analyze] " + s.author_name + " FAILED: " + e.message);
+      console.error("[analyze] FAILED for " + s.author_name + ": " + e.message);
+      // null = skip entirely, don't show as unsigned or signed
       analysis = {
-        is_unsigned:      null, // null = skip, don't default signed or unsigned
-        label_assessment: "Analysis error — manual review required",
+        is_unsigned:      null,
+        label_assessment: "Analysis failed: " + e.message,
         niche:            genres.join(", ") || "unknown",
-        pitch:            "Analysis failed — review manually.",
+        pitch:            "Analysis failed — manual review required.",
         tiktok_momentum:  "unknown",
         algo_notes:       "Manual review required.",
       };
@@ -336,7 +373,8 @@ app.post("/analyze", async (req, res) => {
       " | unsigned=" + analysis.is_unsigned +
       " | spotify_label=" + (spotifyLabel || "null") +
       " | chartex_label=" + (chartexLabel || "null") +
-      " | followers=" + (followers != null ? fmt(followers) : "n/a"));
+      " | followers=" + (followers != null ? fmt(followers) : "null") +
+      " | genres=" + genres.slice(0, 2).join(", "));
 
     results.push(Object.assign({}, s, analysis, {
       spotify_label:      effectiveLabel,
@@ -345,7 +383,6 @@ app.post("/analyze", async (req, res) => {
       spotify_popularity: popularity,
       spotify_genres:     genres.join(", "),
       spotify_release:    releaseDate,
-      spotify_album_type: albumType,
     }));
   }
 
