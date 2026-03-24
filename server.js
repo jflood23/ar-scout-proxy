@@ -49,7 +49,7 @@ function fmt(n) {
 }
 
 app.get("/version", (_, res) => res.json({
-  version: "v30-log-counts",
+  version: "v31-fetch100-real-total",
   anthropic_key_set: !!process.env.ANTHROPIC_API_KEY,
   resend_key_set:    !!process.env.RESEND_API_KEY,
   chartex_key_set:   !!process.env.CHARTEX_APP_ID,
@@ -193,8 +193,9 @@ app.post("/scan", async (req, res) => {
 
   let sounds;
   try {
-    // Fetch 2x to have room after filtering
-    const fetchLimit = Math.min(limit * 2, 100);
+    // Fetch 5x to have enough candidates after the 50k filter
+    // (most OTHERS sounds have >50k all-time creates, so we need a big pool)
+    const fetchLimit = 100; // always fetch max from Chartex
     const data = await cxGet("/tiktok-sounds/", {
       sort_by:          "tiktok_last_7_days_video_count",
       country_codes:    "US",
@@ -217,15 +218,13 @@ app.post("/scan", async (req, res) => {
       }
     }));
 
-    // Log distribution before filtering
-    withRealCounts.forEach(s => console.log("  [count] " + s.tiktok_sound_creator_name + " real_total=" + s.real_total_creates));
-
     // Filter: under 50k all-time creates
     sounds = withRealCounts
       .filter(s => s.real_total_creates > 0 && s.real_total_creates <= 50000)
       .slice(0, limit);
 
     console.log("[scan] " + sounds.length + " sounds after 50k all-time creates filter");
+    sounds.forEach(s => console.log("  [pass] " + s.tiktok_sound_creator_name + " real_total=" + s.real_total_creates + " week=" + s.tiktok_last_7_days_video_count));
   } catch (e) { return res.status(502).json({ error: e.message }); }
 
   const enriched = [];
@@ -238,7 +237,7 @@ app.post("/scan", async (req, res) => {
         author_name:                    s.tiktok_sound_creator_name || s.tiktok_sound_creator_username || "",
         title:                          s.tiktok_name_of_sound || "",
         tiktok_last_7_days_video_count: s.tiktok_last_7_days_video_count || 0,
-        tiktok_total_video_count:       s.real_total_video_count || s.tiktok_total_video_count || 0,
+        tiktok_total_video_count:       s.real_total_creates    || s.tiktok_total_video_count || 0,
         label_name:                     s.label_name || "",
         artists:                        s.artists || "",
         song_name:                      s.song_name || "",
@@ -277,7 +276,7 @@ app.post("/analyze", async (req, res) => {
       "  Artists credited by Chartex: " + (s.artists || "none listed") + "\n" +
       "  Label listed by Chartex: " + (label || "none — not in any major label system") + "\n" +
       "  New TikTok videos this week: " + fmt(s.tiktok_last_7_days_video_count) + "\n" +
-      "  Total TikTok videos all time: " + fmt(s.tiktok_total_video_count) + "\n" +
+      "  Total TikTok videos all time (real): " + fmt(s.tiktok_total_video_count) + "\n" +
       "  Total video views: " + fmt(s.total_video_views) + "\n" +
       "  Total video likes: " + fmt(s.total_video_likes) + "\n" +
       "  Spotify track ID exists: " + (s.spotify_id ? "yes (" + s.spotify_id + ")" : "no — not on Spotify") + "\n" +
