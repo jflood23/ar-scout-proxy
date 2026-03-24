@@ -202,7 +202,7 @@ function fmt(n) {
 
 // ── /version ──────────────────────────────────────────────────────────────────
 app.get("/version", (_, res) => res.json({
-  version:           "v11-spotify-debug",
+  version:           "v12-spotify-trace",
   anthropic_key_set: !!process.env.ANTHROPIC_API_KEY,
   chartex_key_set:   !!process.env.CHARTEX_APP_ID,
   spotify_key_set:   !!process.env.SPOTIFY_CLIENT_ID,
@@ -210,47 +210,45 @@ app.get("/version", (_, res) => res.json({
 
 app.get("/health", (_, res) => res.json({ status: "ok" }));
 
-// ── /spotify-test — surface exact Spotify auth error ─────────────────────────
+// ── /spotify-test — trace exact getSpotifyData execution path ────────────────
 app.get("/spotify-test", async (req, res) => {
+  const log = [];
   try {
-    const creds = Buffer.from(
-      process.env.SPOTIFY_CLIENT_ID + ":" + process.env.SPOTIFY_CLIENT_SECRET
-    ).toString("base64");
-    const tokenRes = await fetch("https://accounts.spotify.com/api/token", {
-      method:  "POST",
-      headers: { "Authorization": "Basic " + creds, "Content-Type": "application/x-www-form-urlencoded" },
-      body:    "grant_type=client_credentials",
-    });
-    const tokenData = await tokenRes.json();
-    if (!tokenRes.ok) {
-      return res.status(200).json({ step: "token_failed", status: tokenRes.status, body: tokenData });
-    }
-    // Token worked — try a simple artist lookup (Radiohead)
-    const artistRes = await fetch("https://api.spotify.com/v1/artists/4Z8W4fKeB5YxbusRsdQVPb", {
-      headers: { "Authorization": "Bearer " + tokenData.access_token },
-    });
-    const artistData = await artistRes.json();
-    if (!artistRes.ok) {
-      return res.status(200).json({ step: "artist_fetch_failed", status: artistRes.status, body: artistData });
-    }
-    // Try search
-    const searchRes = await fetch("https://api.spotify.com/v1/search?q=Still+Haven&type=artist&limit=1&market=US", {
-      headers: { "Authorization": "Bearer " + tokenData.access_token },
-    });
-    const searchData = await searchRes.json();
+    // Step 1: token
+    log.push("getting token...");
+    const token = await getSpotifyToken();
+    log.push("token ok");
+
+    // Step 2: search for Still Haven (same as Path 3 in getSpotifyData)
+    log.push("searching for Still Haven...");
+    const sr = await spFetch("/search?q=" + encodeURIComponent("Still Haven") + "&type=artist&limit=1&market=US");
+    log.push("search response keys: " + Object.keys(sr || {}).join(", "));
+    const foundArtist = sr && sr.artists && sr.artists.items && sr.artists.items[0] || null;
+    if (!foundArtist) { return res.json({ log, error: "no artist found in search" }); }
+    log.push("found artist: " + foundArtist.name + " id=" + foundArtist.id);
+
+    // Step 3: full artist
+    log.push("fetching full artist...");
+    const artistFull = await spFetch("/artists/" + foundArtist.id);
+    log.push("artist followers: " + (artistFull.followers && artistFull.followers.total));
+    log.push("artist genres: " + (artistFull.genres || []).join(", "));
+
+    // Step 4: top tracks
+    log.push("fetching top tracks...");
+    const topTracksRes = await spFetch("/artists/" + foundArtist.id + "/top-tracks?market=US");
+    log.push("top tracks count: " + (topTracksRes.tracks || []).length);
+
     res.json({
-      step:         "all_ok",
-      token_ok:     true,
-      artist_name:  artistData.name,
-      artist_followers: artistData.followers && artistData.followers.total,
-      search_result: searchData.artists && searchData.artists.items && searchData.artists.items[0] && {
-        name:      searchData.artists.items[0].name,
-        followers: searchData.artists.items[0].followers && searchData.artists.items[0].followers.total,
-        genres:    searchData.artists.items[0].genres,
-      },
+      log,
+      result: {
+        artist_name: artistFull.name,
+        followers:   artistFull.followers && artistFull.followers.total,
+        genres:      artistFull.genres,
+        top_tracks:  (topTracksRes.tracks || []).slice(0,3).map(t => t.name),
+      }
     });
   } catch (e) {
-    res.status(200).json({ step: "exception", error: e.message });
+    res.json({ log, error: e.message, stack: e.stack && e.stack.split("\n").slice(0,5) });
   }
 });
 
