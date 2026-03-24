@@ -49,7 +49,7 @@ function fmt(n) {
 }
 
 app.get("/version", (_, res) => res.json({
-  version: "v28-stats-debug",
+  version: "v29-real-total-count",
   anthropic_key_set: !!process.env.ANTHROPIC_API_KEY,
   resend_key_set:    !!process.env.RESEND_API_KEY,
   chartex_key_set:   !!process.env.CHARTEX_APP_ID,
@@ -179,33 +179,11 @@ app.post("/clear-seen", (req, res) => {
 
 app.get("/debug", async (req, res) => {
   try {
-    // Get Still Haven sound ID = 7579661510428428289
-    // Call the historical stats endpoint to get true all-time creates
-    const statsTotal = await cxGet("/tiktok-sounds/7579661510428428289/stats/tiktok-video-counts/", {
-      mode: "total",
+    const data = await cxGet("/tiktok-sounds/", {
+      sort_by: "tiktok_last_7_days_video_count", country_codes: "US", limit: 5, page: 1, label_categories: "OTHERS"
     });
-    const statsDaily = await cxGet("/tiktok-sounds/7579661510428428289/stats/tiktok-video-counts/", {
-      mode: "daily",
-      limit_by_latest_days: 7,
-    });
-    // Also test max_video_count param with different values on the list endpoint
-    const testA = await cxGet("/tiktok-sounds/", {
-      sort_by: "tiktok_last_7_days_video_count", country_codes: "US",
-      limit: 3, page: 1, label_categories: "OTHERS",
-      max_video_count: 50000,
-    });
-    const testB = await cxGet("/tiktok-sounds/", {
-      sort_by: "tiktok_last_7_days_video_count", country_codes: "US",
-      limit: 3, page: 1, label_categories: "OTHERS",
-      max_video_count: 1000,
-    });
-    res.json({
-      still_haven_stats_total: statsTotal,
-      still_haven_stats_daily_7d: statsDaily,
-      list_max_50k_names:  ((testA.data&&testA.data.items)||[]).map(s=>({name:s.tiktok_sound_creator_name,week:s.tiktok_last_7_days_video_count})),
-      list_max_1k_names:   ((testB.data&&testB.data.items)||[]).map(s=>({name:s.tiktok_sound_creator_name,week:s.tiktok_last_7_days_video_count})),
-    });
-  } catch (e) { res.status(502).json({ error: e.message, stack: e.stack&&e.stack.split("\n").slice(0,3) }); }
+    res.json({ sounds: (data.data && data.data.items) || [] });
+  } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
 app.post("/scan", async (req, res) => {
@@ -215,7 +193,7 @@ app.post("/scan", async (req, res) => {
 
   let sounds;
   try {
-    // Fetch extra to account for 7-day filter dropping some
+    // Fetch 2x to have room after filtering
     const fetchLimit = Math.min(limit * 2, 100);
     const data = await cxGet("/tiktok-sounds/", {
       sort_by:          "tiktok_last_7_days_video_count",
@@ -224,17 +202,28 @@ app.post("/scan", async (req, res) => {
       page:             1,
       label_categories: "OTHERS",
     });
-    const all = (data.data && data.data.items) || [];
-    // Keep sounds with 100–5000 new videos/week — emerging but with real traction
-    // tiktok_total_video_count from the API is unreliable (doesn't match website)
-    // so we filter on 7-day count which is accurate
-    sounds = all
-      .filter(s => {
-        const w = s.tiktok_last_7_days_video_count || 0;
-        return w >= 100 && w <= 5000;
-      })
+    const candidates = (data.data && data.data.items) || [];
+    console.log("[scan] " + candidates.length + " candidates from Chartex");
+
+    // For each sound, fetch real all-time creates from stats endpoint
+    // (tiktok_total_video_count in the list API is stale/wrong — stats endpoint has the real number)
+    const withRealCounts = await Promise.all(candidates.map(async function(s) {
+      try {
+        const stats = await cxGet("/tiktok-sounds/" + s.tiktok_sound_id + "/stats/tiktok-video-counts/", { mode: "total" });
+        const realTotal = (stats.data && stats.data.tiktok_total_video_count) || 0;
+        return Object.assign({}, s, { real_total_creates: realTotal });
+      } catch (e) {
+        return Object.assign({}, s, { real_total_creates: s.tiktok_total_video_count || 0 });
+      }
+    }));
+
+    // Filter: under 50k all-time creates (real number from stats endpoint)
+    sounds = withRealCounts
+      .filter(s => s.real_total_video_count > 0 && s.real_total_video_count < 50000)
       .slice(0, limit);
-    console.log("[scan] " + all.length + " fetched → " + sounds.length + " in 100-5000/week range");
+
+    console.log("[scan] " + sounds.length + " sounds after 50k all-time creates filter");
+    sounds.forEach(s => console.log("  " + s.tiktok_sound_creator_name + " real_total=" + s.real_total_creates));
   } catch (e) { return res.status(502).json({ error: e.message }); }
 
   const enriched = [];
@@ -247,7 +236,7 @@ app.post("/scan", async (req, res) => {
         author_name:                    s.tiktok_sound_creator_name || s.tiktok_sound_creator_username || "",
         title:                          s.tiktok_name_of_sound || "",
         tiktok_last_7_days_video_count: s.tiktok_last_7_days_video_count || 0,
-        tiktok_total_video_count:       s.tiktok_total_video_count || 0,
+        tiktok_total_video_count:       s.real_total_video_count || s.tiktok_total_video_count || 0,
         label_name:                     s.label_name || "",
         artists:                        s.artists || "",
         song_name:                      s.song_name || "",
