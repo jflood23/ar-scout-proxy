@@ -102,21 +102,24 @@ async function getSpotifyData(trackId, artistName, trackName) {
       const foundArtist = sr && sr.artists && sr.artists.items && sr.artists.items[0] || null;
       if (foundArtist) {
         console.log("[spotify] artist search found: " + foundArtist.name);
-        const [artistFull, topTracksRes] = await Promise.all([
-          spFetch("/artists/" + foundArtist.id),
-          spFetch("/artists/" + foundArtist.id + "/top-tracks?market=US"),
-        ]);
+        const artistFull = await spFetch("/artists/" + foundArtist.id);
+        let topTracksRes = { tracks: [] };
+        try { topTracksRes = await spFetch("/artists/" + foundArtist.id + "/top-tracks?market=US"); } catch(e) {
+          console.log("[spotify] top-tracks skipped (path3): " + e.message);
+        }
+        const followerCount = (artistFull.followers && artistFull.followers.total != null)
+          ? artistFull.followers.total : null;
         return {
           track_name:        null,
           track_popularity:  null,
-          label:             null, // no track, so no album.label
+          label:             null,
           release_date:      null,
           album_type:        null,
           album_name:        null,
           artist_id:         artistFull.id,
           artist_name:       artistFull.name,
           artist_url:        artistFull.external_urls && artistFull.external_urls.spotify,
-          followers:         artistFull.followers.total,
+          followers:         followerCount,
           artist_popularity: artistFull.popularity,
           genres:            artistFull.genres || [],
           top_track_names:   (topTracksRes.tracks || []).slice(0, 3).map(t => t.name),
@@ -132,13 +135,17 @@ async function getSpotifyData(trackId, artistName, trackName) {
     if (!track.artists || !track.artists.length) return null;
 
     const primaryArtist = track.artists[0];
-    const [artistFull, topTracksRes] = await Promise.all([
-      spFetch("/artists/" + primaryArtist.id),
-      spFetch("/artists/" + primaryArtist.id + "/top-tracks?market=US"),
-    ]);
+    const artistFull = await spFetch("/artists/" + primaryArtist.id);
+    let topTracksRes = { tracks: [] };
+    try { topTracksRes = await spFetch("/artists/" + primaryArtist.id + "/top-tracks?market=US"); } catch(e) {
+      console.log("[spotify] top-tracks skipped: " + e.message);
+    }
+
+    const followerCount = (artistFull.followers && artistFull.followers.total != null)
+      ? artistFull.followers.total : null;
 
     console.log("[spotify] got data for " + artistFull.name +
-      " | followers=" + artistFull.followers.total +
+      " | followers=" + followerCount +
       " | label=" + (track.album && track.album.label || "none") +
       " | genres=" + (artistFull.genres || []).slice(0, 2).join(", "));
 
@@ -152,7 +159,7 @@ async function getSpotifyData(trackId, artistName, trackName) {
       artist_id:         artistFull.id,
       artist_name:       artistFull.name,
       artist_url:        artistFull.external_urls && artistFull.external_urls.spotify,
-      followers:         artistFull.followers.total,
+      followers:         followerCount,
       artist_popularity: artistFull.popularity,
       genres:            artistFull.genres || [],
       top_track_names:   (topTracksRes.tracks || []).slice(0, 3).map(t => t.name),
@@ -202,7 +209,7 @@ function fmt(n) {
 
 // ── /version ──────────────────────────────────────────────────────────────────
 app.get("/version", (_, res) => res.json({
-  version:           "v12-spotify-trace",
+  version:           "v13-top-tracks-fix",
   anthropic_key_set: !!process.env.ANTHROPIC_API_KEY,
   chartex_key_set:   !!process.env.CHARTEX_APP_ID,
   spotify_key_set:   !!process.env.SPOTIFY_CLIENT_ID,
@@ -230,7 +237,7 @@ app.get("/spotify-test", async (req, res) => {
     // Step 3: full artist
     log.push("fetching full artist...");
     const artistFull = await spFetch("/artists/" + foundArtist.id);
-    log.push("artist followers: " + (artistFull.followers && artistFull.followers.total));
+    log.push("artist followers: " + (artistFull.followers && artistFull.followers.total != null ? artistFull.followers.total : "undefined/null"));
     log.push("artist genres: " + (artistFull.genres || []).join(", "));
 
     // Step 4: top tracks
