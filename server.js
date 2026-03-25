@@ -30,15 +30,54 @@ async function cxGet(apiPath, params) {
   return res.json();
 }
 
-async function askClaude(prompt) {
+async function askClaude(prompt, attempt) {
+  attempt = attempt || 1;
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
     body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1200, messages: [{ role: "user", content: prompt }] }),
   });
   const d = await res.json();
+  if (res.status === 529 && attempt <= 4) {
+    const wait = Math.pow(2, attempt) * 1000; // 2s, 4s, 8s, 16s
+    console.log("[claude] 529 overloaded — retrying in " + wait + "ms (attempt " + attempt + ")");
+    await new Promise(r => setTimeout(r, wait));
+    return askClaude(prompt, attempt + 1);
+  }
   if (!res.ok) throw new Error("Claude " + res.status + ": " + JSON.stringify(d));
   return (d.content || []).map(b => b.text || "").join("");
+}
+
+// Pre-filter using Chartex label field before spending Claude credits
+// Returns: "signed" | "unsigned" | null (needs Claude)
+function preFilterLabel(labelName) {
+  if (!labelName) return null; // no label data, needs Claude
+
+  const l = labelName.toLowerCase();
+
+  // Known signed labels — return signed immediately
+  const signedPatterns = [
+    "universal", "umg", "sony", "columbia", "atlantic", "warner", "interscope",
+    "republic", "capitol", "rca", "island", "epic", "virgin", "parlophone",
+    "polydor", "def jam", "motown", "aftermath", "cash money", "roc nation",
+    "tde", "top dawg", "bad boy", "300 entertainment", "kobalt", "concord",
+    "ninja tune", "warp", "sub pop", "merge records", "epitaph", "beggars",
+    "secretly group", "bighit", "big hit", "hybe", "sm entertainment",
+    "jyp", "yg entertainment", "cnco", "geffen", "mca", "emi",
+  ];
+  if (signedPatterns.some(p => l.includes(p))) return "signed";
+
+  // Known distributors — unsigned
+  const distributorPatterns = [
+    "distrokid", "tunecore", "cd baby", "cdbaby", "amuse", "united masters",
+    "unitedmasters", "onrpm", "stem disintermedia", "soundrop", "fresh tunes",
+    "south-atlantic", "south atlantic", "santa anna", "open shift",
+    "records dk", // DistroKid auto-generated label names like "9484832 Records DK"
+    "exclusively distributed",
+  ];
+  if (distributorPatterns.some(p => l.includes(p))) return "unsigned";
+
+  return null; // unknown label, needs Claude
 }
 
 function fmt(n) {
@@ -49,7 +88,7 @@ function fmt(n) {
 }
 
 app.get("/version", (_, res) => res.json({
-  version: "v31-fetch100-real-total",
+  version: "v32-retry-prefilter",
   anthropic_key_set: !!process.env.ANTHROPIC_API_KEY,
   resend_key_set:    !!process.env.RESEND_API_KEY,
   chartex_key_set:   !!process.env.CHARTEX_APP_ID,
@@ -264,9 +303,22 @@ app.post("/analyze", async (req, res) => {
   if (!sounds.length) return res.json({ results: [] });
 
   const results = [];
+
   for (const s of sounds) {
     const inf = s.top_influencers && s.top_influencers.length ? JSON.stringify(s.top_influencers) : "none";
     const label = s.label_name || "";
+
+    // Pre-filter using label field — skip Claude entirely when we can determine status
+    const preFilter = preFilterLabel(label);
+    if (preFilter === "signed") {
+      console.log("[analyze] PRE-FILTER signed: " + s.author_name + " | label=" + label);
+      results.push(Object.assign({}, s, { is_unsigned: false, label_assessment: label + " (pre-filtered)", niche: "", pitch: "", tiktok_momentum: "unknown", algo_notes: "", spotify_link: null }));
+      continue;
+    }
+    if (preFilter === "unsigned") {
+      console.log("[analyze] PRE-FILTER unsigned: " + s.author_name + " | label=" + label + " (distributor)");
+      // Still needs Claude for pitch/niche/algo — fall through to Claude but hint the label status
+    }
 
     const prompt =
       "You are a senior A&R scout at an independent label. Analyze this TikTok-trending sound.\n\n" +
@@ -274,7 +326,7 @@ app.post("/analyze", async (req, res) => {
       "  Sound: \"" + s.title + "\"\n" +
       "  Creator: " + s.author_name + "\n" +
       "  Artists credited by Chartex: " + (s.artists || "none listed") + "\n" +
-      "  Label listed by Chartex: " + (label || "none — not in any major label system") + "\n" +
+      "  Label listed by Chartex: " + (label || "none — not in any major label system") + (preFilter === "unsigned" ? " [DISTRIBUTOR — artist is unsigned]" : "") + "\n" +
       "  New TikTok videos this week: " + fmt(s.tiktok_last_7_days_video_count) + "\n" +
       "  Total TikTok videos all time (real): " + fmt(s.tiktok_total_video_count) + "\n" +
       "  Total video views: " + fmt(s.total_video_views) + "\n" +
@@ -302,6 +354,9 @@ app.post("/analyze", async (req, res) => {
       "Reply ONLY with this JSON, no markdown:\n" +
       "{\"is_unsigned\":true,\"label_assessment\":\"exact label found or specific reason unsigned\",\"niche\":\"2-4 specific subgenre tags\",\"pitch\":\"3-4 data-driven sentences\",\"tiktok_momentum\":\"hot or growing or stable or declining\",\"algo_notes\":\"2 specific sentences\"}";
 
+    // Small delay between Claude calls to avoid 529 overload
+    await new Promise(r => setTimeout(r, 1000)); // 1s between calls to avoid 529
+
     let analysis;
     try {
       const raw   = await askClaude(prompt);
@@ -316,6 +371,9 @@ app.post("/analyze", async (req, res) => {
     }
 
     console.log("[analyze] " + s.author_name + " | unsigned=" + analysis.is_unsigned + " | chartex_label=" + (label || "none"));
+
+    // Small delay between calls to avoid 529 overload
+    await new Promise(r => setTimeout(r, 1000)); // 1s between calls
 
     results.push(Object.assign({}, s, analysis, {
       spotify_link: s.spotify_id ? "https://open.spotify.com/track/" + s.spotify_id : null,
