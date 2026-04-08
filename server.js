@@ -228,7 +228,7 @@ app.get("/chartmetric/artist", async (req, res) => {
 });
 
 app.get("/version", (_, res) => res.json({
-  version: "v34-cm-api-fix",
+  version: "v36-debug",
   anthropic_key_set:    !!process.env.ANTHROPIC_API_KEY,
   resend_key_set:       !!process.env.RESEND_API_KEY,
   chartex_key_set:      !!process.env.CHARTEX_APP_ID,
@@ -368,12 +368,33 @@ app.post("/clear-seen", (req, res) => {
 });
 
 app.get("/debug", async (req, res) => {
+  // Diagnostic endpoint — shows how many sounds pass each filter stage
+  const out = { stages: {}, sounds_sample: [] };
   try {
     const data = await cxGet("/tiktok-sounds/", {
-      sort_by: "tiktok_last_7_days_video_count", country_codes: "US", limit: 5, page: 1, label_categories: "OTHERS"
+      sort_by: "tiktok_last_7_days_video_count", country_codes: "US", limit: 20, page: 1, label_categories: "OTHERS"
     });
-    res.json({ sounds: (data.data && data.data.items) || [] });
-  } catch (e) { res.status(502).json({ error: e.message }); }
+    const candidates = (data.data && data.data.items) || [];
+    out.stages.chartex_returned = candidates.length;
+
+    // Fetch real counts for first 5 only (quick check)
+    const sample = candidates.slice(0, 5);
+    const withCounts = await Promise.all(sample.map(async function(s) {
+      try {
+        const stats = await cxGet("/tiktok-sounds/" + s.tiktok_sound_id + "/stats/tiktok-video-counts/", { mode: "total" });
+        const realTotal = (stats.data && stats.data.tiktok_total_video_count) || 0;
+        return { name: s.tiktok_sound_creator_name, stats_ok: true, real_total: realTotal, list_total: s.tiktok_total_video_count, week: s.tiktok_last_7_days_video_count, label: s.label_name };
+      } catch (e) {
+        return { name: s.tiktok_sound_creator_name, stats_ok: false, stats_error: e.message, list_total: s.tiktok_total_video_count, week: s.tiktok_last_7_days_video_count, label: s.label_name };
+      }
+    }));
+    out.sounds_sample = withCounts;
+
+    const seen = loadSeen();
+    out.stages.seen_count = seen.size;
+    out.stages.filter_logic = "stats_ok ? real_total<=50000 : pass_through";
+  } catch (e) { out.error = e.message; }
+  res.json(out);
 });
 
 app.post("/scan", async (req, res) => {
