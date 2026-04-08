@@ -102,6 +102,16 @@
     font-size: 9px; color: #1a1a1a; letter-spacing: 1px; }
 
   #view-running, #view-results, #view-email { display: none; }
+
+  .badge { display: inline-block; font-size: 8px; font-weight: 700; padding: 2px 7px;
+    border-radius: 3px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .badge-immediate  { background: #ff3d3d; color: #000; }
+  .badge-quarter    { background: #f0a500; color: #000; }
+  .badge-monitor    { background: #333; color: #999; }
+  .badge-strong     { background: #00c48c; color: #000; }
+  .badge-moderate   { background: #c8ff00; color: #000; }
+  .badge-emerging   { background: #1a1a30; color: #888; border: 1px solid #2a2a40; }
+  .cm-link { color: #00a9ff; font-size: 9px; }
 </style>
 </head>
 <body>
@@ -110,7 +120,7 @@
     <span style="font-size:20px">🎵</span>
     <div>
       <div class="header-title">A&R Scout</div>
-      <div class="header-sub">UNSIGNED ARTIST DISCOVERY — CHARTEX × CLAUDE</div>
+      <div class="header-sub">UNSIGNED ARTIST DISCOVERY — CHARTEX × CHARTMETRIC × CLAUDE</div>
     </div>
     <div class="header-actions" id="header-actions"></div>
   </div>
@@ -136,15 +146,13 @@
           <span id="save-ok" class="save-ok" style="display:none">✓ Saved</span>
         </div>
         <div class="divider"></div>
-        <button class="btn btn-run" onclick="runPipeline()">▶ RUN DISCOVERY PIPELINE</button>
+        <button class="btn btn-run" onclick="runDeepScan()" style="background:#00a9ff;color:#000">⚡ DEEP SCAN — CHARTEX + CHARTMETRIC + CLAUDE</button>
+        <button class="btn btn-run" onclick="runPipeline()" style="margin-top:8px;background:#1a1a30;color:#c8ff00;border:1px solid #2a2a50">▶ STANDARD SCAN — CHARTEX + CLAUDE ONLY</button>
         <button style="margin-top:10px;width:100%;background:transparent;border:1px solid #2a2a3a;color:#555;border-radius:4px;padding:8px;font-family:'Courier New',monospace;font-size:9px;letter-spacing:1px;cursor:pointer;text-transform:uppercase"
           onclick="clearSeen()">↺ Clear Seen Artists (re-show previously sent artists)</button>
         <div class="info-box">
-          Chartex pre-filters major label sounds. Claude uses its training knowledge
-          plus Chartex label data to verify unsigned status and write specific pitches.
-          Requires <strong style="color:#666">ANTHROPIC_API_KEY</strong> and
-          <strong style="color:#666">CHARTEX_APP_ID</strong> /
-          <strong style="color:#666">CHARTEX_APP_TOKEN</strong> in Render env vars.
+          <strong style="color:#00a9ff">Deep Scan</strong> — Chartex TikTok data + Chartmetric cross-platform stats (Spotify, Instagram, YouTube) + Claude analysis with <em>signing urgency</em> and <em>platform score</em>. Requires <strong style="color:#666">CHARTMETRIC_REFRESH_TOKEN</strong> in addition to existing env vars.<br><br>
+          <strong style="color:#666">Standard Scan</strong> — Chartex + Claude only (existing pipeline, no Chartmetric needed).
         </div>
       </div>
     </div>
@@ -218,6 +226,89 @@ async function sendEmail() {
     alert("❌ Send failed: " + e.message);
     if (btn) { btn.textContent = "✉️ Send Email"; btn.disabled = false; }
   }
+}
+
+async function runDeepScan() {
+  STATE.proxyUrl = document.getElementById("inp-proxy").value.trim();
+  STATE.scanSize = document.getElementById("inp-scan").value;
+  if (!STATE.proxyUrl) { alert("Enter your Render proxy URL."); return; }
+
+  var limit = Math.max(1, Math.min(parseInt(STATE.scanSize) || 20, 100));
+  STATE.artists = [];
+  STATE.rawAnalyzed = [];
+
+  initRunning();
+  showView("running");
+  setProgress(0, 0, "Starting deep scan…");
+  addLog("⚡ Deep Scan — Chartex + Chartmetric + Claude (server-side)…");
+  addLog("📡 Calling /deep-scan on proxy…");
+  addLog("   This may take 2-5 minutes for " + limit + " sounds — Chartmetric enrichment runs serially.", "muted");
+
+  try {
+    var r = await fetch(STATE.proxyUrl.replace(/\/$/, "") + "/deep-scan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ limit: limit }),
+    });
+    if (!r.ok) {
+      var errText = await r.text();
+      var errJson;
+      try { errJson = JSON.parse(errText); } catch(e) {}
+      throw new Error((errJson && errJson.error) || errText || r.status);
+    }
+    var d = await r.json();
+    var artists = d.artists || [];
+    addLog("✅ Deep scan complete — " + artists.length + " unsigned artists (of " + (d.total_scanned || "?") + " scanned)", "success");
+    STATE.rawAnalyzed = artists;
+
+    for (var i = 0; i < artists.length; i++) {
+      var a = artists[i];
+      if (a.is_unsigned === false) continue;
+      addLog("  ✅ " + a.author_name + " | " + a.niche + " | urgency=" + (a.signing_urgency || "?") + " | platform=" + (a.platform_score || "?"), "success");
+      STATE.artists.push({
+        rank:   STATE.artists.length + 1,
+        artist: a.author_name,
+        track:  a.title,
+        v7d:    a.tiktok_last_7_days_video_count,
+        vTotal: a.tiktok_total_video_count,
+        label:  a.label_assessment,
+        niche:  a.niche,
+        pitch:  a.pitch,
+        momentum: a.tiktok_momentum,
+        algo:   a.algo_notes,
+        tiktokUrl:   a.tiktok_official_link || null,
+        spotifyLink: a.spotify_link || null,
+        totalViews:  a.total_video_views || 0,
+        totalLikes:  a.total_video_likes || 0,
+        // Deep scan extras
+        deep_scan:             true,
+        platform_score:        a.platform_score        || null,
+        signing_urgency:       a.signing_urgency       || null,
+        cm_artist_url:         a.cm_artist_url         || null,
+        spotify_monthly_listeners: a.spotify_monthly_listeners || null,
+        spotify_followers:     a.spotify_followers     || null,
+        spotify_popularity:    a.spotify_popularity    || null,
+        instagram_followers:   a.instagram_followers   || null,
+        instagram_engagement:  a.instagram_engagement  || null,
+        youtube_subscribers:   a.youtube_subscribers   || null,
+        youtube_views:         a.youtube_views         || null,
+        tiktok_cm_followers:   a.tiktok_cm_followers   || null,
+      });
+      addChip(a.author_name);
+    }
+  } catch(e) {
+    addLog("❌ Deep scan failed: " + e.message, "error");
+    document.getElementById("warn-banner").innerHTML =
+      "⚠️ <strong>/deep-scan error:</strong> " + esc(e.message) +
+      "<br>Check that CHARTMETRIC_REFRESH_TOKEN, CHARTEX_APP_ID, ANTHROPIC_API_KEY are all set in Render env vars.";
+    document.getElementById("warn-banner").style.display = "block";
+  }
+
+  addLog("\n🎯 Done — " + STATE.artists.length + " unsigned artists found.", "success");
+  STATE.email = buildEmail(STATE.artists);
+  document.getElementById("email-body").textContent = STATE.email;
+  renderResults();
+  showView("results");
 }
 
 function showView(name) {
@@ -415,6 +506,9 @@ function renderResults() {
     return;
   }
 
+  var URGENCY_CLASS = { "immediate": "badge-immediate", "this-quarter": "badge-quarter", "monitor": "badge-monitor" };
+  var PLATFORM_CLASS = { "strong": "badge-strong", "moderate": "badge-moderate", "emerging": "badge-emerging" };
+
   var html = STATE.artists.map(function(a) {
     var mc   = MCOLOR[a.momentum] || "#444";
     var tags = (a.niche || "").split(",").slice(0,2)
@@ -422,6 +516,32 @@ function renderResults() {
     var links = "";
     if (a.tiktokUrl)   links += '<a class="ext-link" href="' + esc(a.tiktokUrl)   + '" target="_blank">↗ TikTok Sound</a>';
     if (a.spotifyLink) links += '<a class="ext-link" href="' + esc(a.spotifyLink) + '" target="_blank">↗ Spotify Track</a>';
+    if (a.cm_artist_url) links += '<a class="ext-link cm-link" href="' + esc(a.cm_artist_url) + '" target="_blank">↗ Chartmetric Profile</a>';
+
+    // Signing urgency + platform score badges (deep scan only)
+    var headerBadges = "";
+    if (a.deep_scan) {
+      if (a.signing_urgency) headerBadges += '<span class="badge ' + (URGENCY_CLASS[a.signing_urgency] || "badge-monitor") + '">' + esc(a.signing_urgency) + '</span> ';
+      if (a.platform_score)  headerBadges += '<span class="badge ' + (PLATFORM_CLASS[a.platform_score]  || "badge-emerging") + '">' + esc(a.platform_score) + ' platform</span>';
+    }
+
+    // Platform section (deep scan only)
+    var platformSection = "";
+    if (a.deep_scan) {
+      var igEng = a.instagram_engagement ? (a.instagram_engagement * 100).toFixed(2) + "%" : "—";
+      platformSection =
+        '<div style="margin-top:18px">' +
+          '<div class="sec-label" style="color:#00a9ff">Cross-Platform (Chartmetric)</div>' +
+          '<div class="data-row"><span class="data-lbl">Spotify listeners/mo</span><span class="data-val accent">' + (a.spotify_monthly_listeners != null ? fmt(a.spotify_monthly_listeners) : "—") + '</span></div>' +
+          '<div class="data-row"><span class="data-lbl">Spotify followers</span><span class="data-val">' + (a.spotify_followers != null ? fmt(a.spotify_followers) : "—") + '</span></div>' +
+          '<div class="data-row"><span class="data-lbl">Spotify popularity</span><span class="data-val">' + (a.spotify_popularity != null ? a.spotify_popularity + "/100" : "—") + '</span></div>' +
+          '<div class="data-row"><span class="data-lbl">Instagram followers</span><span class="data-val">' + (a.instagram_followers != null ? fmt(a.instagram_followers) : "—") + '</span></div>' +
+          '<div class="data-row"><span class="data-lbl">Instagram engagement</span><span class="data-val">' + igEng + '</span></div>' +
+          '<div class="data-row"><span class="data-lbl">YouTube subscribers</span><span class="data-val">' + (a.youtube_subscribers != null ? fmt(a.youtube_subscribers) : "—") + '</span></div>' +
+          '<div class="data-row"><span class="data-lbl">TikTok followers</span><span class="data-val">' + (a.tiktok_cm_followers != null ? fmt(a.tiktok_cm_followers) : "—") + '</span></div>' +
+        '</div>';
+    }
+
     return (
       '<div class="card" id="card-' + a.rank + '" style="background:#07070e;border:1px solid #111122">' +
         '<div class="card-row" onclick="toggleCard(' + a.rank + ')">' +
@@ -429,6 +549,7 @@ function renderResults() {
           '<div class="card-info">' +
             '<div class="card-name">' + esc(a.artist) + '</div>' +
             '<div class="card-track">"' + esc(a.track) + '"</div>' +
+            (headerBadges ? '<div style="margin-top:4px">' + headerBadges + '</div>' : '') +
           '</div>' +
           '<div class="niche-tags">' + tags + '</div>' +
           '<div class="card-v7d"><div class="v7d-num">' + fmt(a.v7d) + '</div><div class="v7d-lbl">7d videos</div></div>' +
@@ -445,6 +566,7 @@ function renderResults() {
               '<div class="data-row"><span class="data-lbl">Label status</span><span class="data-val sm">' + esc(a.label) + '</span></div>' +
               '<div class="data-row"><span class="data-lbl">Total views</span><span class="data-val accent">' + fmt(a.totalViews) + '</span></div>' +
               '<div class="data-row"><span class="data-lbl">Total likes</span><span class="data-val">' + fmt(a.totalLikes) + '</span></div>' +
+              platformSection +
               '<div class="ext-links">' + links + '</div>' +
             '</div>' +
             '<div>' +
@@ -487,9 +609,20 @@ function buildEmail(list) {
     t += "  TikTok 7-day videos:    " + fmt(a.v7d) + "\n";
     t += "  TikTok all-time:        " + fmt(a.vTotal) + "\n";
     t += "  Label status:           " + a.label + "\n";
-    t += "  Spotify followers:      " + (a.spotify_followers || "—") + "\n";
-    t += "  Spotify popularity:     " + (a.spotify_popularity || "—") + "/100\n";
-    t += "  Genres:                 " + (a.spotify_genres || "—") + "\n\n";
+    if (a.deep_scan) {
+      t += "  Spotify listeners/mo:   " + (a.spotify_monthly_listeners != null ? fmt(a.spotify_monthly_listeners) : "—") + "\n";
+      t += "  Spotify followers:      " + (a.spotify_followers != null ? fmt(a.spotify_followers) : "—") + "\n";
+      t += "  Spotify popularity:     " + (a.spotify_popularity != null ? a.spotify_popularity + "/100" : "—") + "\n";
+      t += "  Instagram followers:    " + (a.instagram_followers != null ? fmt(a.instagram_followers) : "—") + "\n";
+      t += "  Instagram engagement:   " + (a.instagram_engagement != null ? (a.instagram_engagement * 100).toFixed(2) + "%" : "—") + "\n";
+      t += "  YouTube subscribers:    " + (a.youtube_subscribers != null ? fmt(a.youtube_subscribers) : "—") + "\n";
+      t += "  Platform score:         " + (a.platform_score || "—") + "\n";
+      t += "  Signing urgency:        " + (a.signing_urgency || "—") + "\n";
+    } else {
+      t += "  Spotify followers:      " + (a.spotify_followers || "—") + "\n";
+      t += "  Spotify popularity:     " + (a.spotify_popularity || "—") + "/100\n";
+    }
+    t += "\n";
     if (a.tiktokUrl)        t += "🔗 TikTok Sound:    " + a.tiktokUrl        + "\n";
     if (a.spotifyUrl)       t += "🎧 Spotify Track:   " + a.spotifyUrl       + "\n";
     if (a.spotify_artist_url) t += "👤 Spotify Artist:  " + a.spotify_artist_url + "\n";

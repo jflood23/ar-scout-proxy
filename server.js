@@ -6,6 +6,37 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
 const CHARTEX_BASE = "https://api.chartex.com/external/v1";
+const CM_BASE      = "https://api1.chartmetric.com/api";
+
+// In-memory Chartmetric token cache — resets on process restart
+const cmToken = { value: null, expires: 0 };
+
+async function cmAuth() {
+  if (cmToken.value && Date.now() < cmToken.expires - 60_000) return cmToken.value;
+  const refreshToken = process.env.CHARTMETRIC_REFRESH_TOKEN;
+  if (!refreshToken) throw new Error("CHARTMETRIC_REFRESH_TOKEN not set");
+  const res = await fetch(CM_BASE + "/token", {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body:    JSON.stringify({ refreshtoken: refreshToken }),
+  });
+  if (!res.ok) throw new Error("Chartmetric auth " + res.status);
+  const d = await res.json();
+  cmToken.value   = d.token;
+  cmToken.expires = Date.now() + (d.expires_in || 3600) * 1000;
+  console.log("[chartmetric] token refreshed, expires in " + Math.round((cmToken.expires - Date.now()) / 1000) + "s");
+  return cmToken.value;
+}
+
+async function cmGet(apiPath, params) {
+  const token = await cmAuth();
+  const qs    = params ? "?" + new URLSearchParams(params).toString() : "";
+  const res   = await fetch(CM_BASE + apiPath + qs, {
+    headers: { "Authorization": "Bearer " + token },
+  });
+  if (!res.ok) throw new Error("Chartmetric " + res.status + " on " + apiPath);
+  return res.json();
+}
 
 // Chartex label_categories=OTHERS already filters UMG/Sony/WMG/BMG/BigIndie
 // For remaining sounds, Claude uses its training knowledge to identify signed artists
@@ -87,11 +118,121 @@ function fmt(n) {
   return String(n);
 }
 
+// ── Chartmetric enrichment ────────────────────────────────────────────────────
+const CM_DELAY = 500; // ms between Chartmetric calls (rate-limit courtesy)
+
+async function enrichWithChartmetric(artistName) {
+  const result = {
+    cm_artist_id:              null,
+    cm_artist_url:             null,
+    spotify_monthly_listeners: null,
+    spotify_followers:         null,
+    spotify_popularity:        null,
+    instagram_followers:       null,
+    instagram_engagement:      null,
+    youtube_subscribers:       null,
+    youtube_views:             null,
+    tiktok_cm_followers:       null,
+    tiktok_cm_video_views:     null,
+    label_from_cm:             null,
+    cm_error:                  null,
+  };
+
+  try {
+    // 1. Search for artist by name
+    await new Promise(r => setTimeout(r, CM_DELAY));
+    const searchData = await cmGet("/search/artist", { q: artistName, limit: 5 });
+    const artists = (searchData.obj && searchData.obj.artists) || searchData.data || [];
+    if (!artists.length) {
+      result.cm_error = "not found in Chartmetric";
+      return result;
+    }
+    const match = artists[0];
+    result.cm_artist_id  = match.id;
+    result.cm_artist_url = "https://app.chartmetric.com/artist/" + match.id;
+
+    // 2. Artist profile (label info)
+    await new Promise(r => setTimeout(r, CM_DELAY));
+    try {
+      const profile = await cmGet("/artist/" + match.id);
+      const obj = (profile.obj || profile.data || {});
+      result.label_from_cm = obj.label || null;
+    } catch (e) { console.warn("[cm] profile failed:", e.message); }
+
+    // Stat endpoints return a time-series array in obj; we want the most recent entry.
+    // Docs require a `since` date param. We request the last 30 days and take the last element.
+    const since30 = new Date(Date.now() - 30 * 86400_000).toISOString().slice(0, 10);
+    function latestStat(data) {
+      const arr = data.obj || data.data || [];
+      if (!Array.isArray(arr) || !arr.length) return {};
+      return arr[arr.length - 1] || {};
+    }
+
+    // 3. Spotify stats
+    await new Promise(r => setTimeout(r, CM_DELAY));
+    try {
+      const spData = await cmGet("/artist/" + match.id + "/stat/spotify", { since: since30 });
+      const sp = latestStat(spData);
+      // API returns `listeners` (monthly listeners) and `followers`, `popularity`
+      result.spotify_monthly_listeners = sp.listeners  || sp.monthly_listeners || null;
+      result.spotify_followers         = sp.followers  || null;
+      result.spotify_popularity        = sp.popularity || null;
+    } catch (e) { console.warn("[cm] spotify stats failed:", e.message); }
+
+    // 4. Instagram stats
+    await new Promise(r => setTimeout(r, CM_DELAY));
+    try {
+      const igData = await cmGet("/artist/" + match.id + "/stat/instagram", { since: since30 });
+      const ig = latestStat(igData);
+      result.instagram_followers  = ig.followers       || null;
+      result.instagram_engagement = ig.engagement_rate || null;
+    } catch (e) { console.warn("[cm] instagram stats failed:", e.message); }
+
+    // 5. YouTube stats — source is "youtube_channel" per API docs
+    await new Promise(r => setTimeout(r, CM_DELAY));
+    try {
+      const ytData = await cmGet("/artist/" + match.id + "/stat/youtube_channel", { since: since30 });
+      const yt = latestStat(ytData);
+      result.youtube_subscribers = yt.subscribers || null;
+      result.youtube_views       = yt.views       || null;
+    } catch (e) { console.warn("[cm] youtube stats failed:", e.message); }
+
+    // 6. TikTok stats (from Chartmetric)
+    await new Promise(r => setTimeout(r, CM_DELAY));
+    try {
+      const ttData = await cmGet("/artist/" + match.id + "/stat/tiktok", { since: since30 });
+      const tt = latestStat(ttData);
+      result.tiktok_cm_followers   = tt.followers   || null;
+      result.tiktok_cm_video_views = tt.video_views || null;
+    } catch (e) { console.warn("[cm] tiktok stats failed:", e.message); }
+
+  } catch (e) {
+    console.error("[cm] enrichWithChartmetric failed for \"" + artistName + "\":", e.message);
+    result.cm_error = e.message;
+  }
+
+  return result;
+}
+
+// ── GET /chartmetric/artist ───────────────────────────────────────────────────
+app.get("/chartmetric/artist", async (req, res) => {
+  if (!process.env.CHARTMETRIC_REFRESH_TOKEN) return res.status(500).json({ error: "CHARTMETRIC_REFRESH_TOKEN not set" });
+  const name = (req.query.name || "").trim();
+  if (!name) return res.status(400).json({ error: "name query param required" });
+  try {
+    const data = await enrichWithChartmetric(name);
+    res.json({ ok: true, data });
+  } catch (e) {
+    res.status(502).json({ error: e.message });
+  }
+});
+
 app.get("/version", (_, res) => res.json({
-  version: "v32-retry-prefilter",
-  anthropic_key_set: !!process.env.ANTHROPIC_API_KEY,
-  resend_key_set:    !!process.env.RESEND_API_KEY,
-  chartex_key_set:   !!process.env.CHARTEX_APP_ID,
+  version: "v34-cm-api-fix",
+  anthropic_key_set:    !!process.env.ANTHROPIC_API_KEY,
+  resend_key_set:       !!process.env.RESEND_API_KEY,
+  chartex_key_set:      !!process.env.CHARTEX_APP_ID,
+  chartmetric_key_set:  !!process.env.CHARTMETRIC_REFRESH_TOKEN,
 }));
 
 app.get("/health", (_, res) => res.json({ status: "ok" }));
@@ -132,6 +273,15 @@ function buildEmailHtml(artists) {
         <tr><td style="color:#555;padding:3px 0">Total views</td><td style="color:#bbb">${fmtN(a.total_video_views)}</td></tr>
         <tr><td style="color:#555;padding:3px 0">Total likes</td><td style="color:#bbb">${fmtN(a.total_video_likes)}</td></tr>
         <tr><td style="color:#555;padding:3px 0">Label status</td><td style="color:#bbb">${a.label_assessment||""}</td></tr>
+        ${a.deep_scan ? `
+        <tr><td style="color:#555;padding:3px 0">Spotify listeners/mo</td><td style="color:#bbb">${a.spotify_monthly_listeners != null ? fmtN(a.spotify_monthly_listeners) : "—"}</td></tr>
+        <tr><td style="color:#555;padding:3px 0">Spotify followers</td><td style="color:#bbb">${a.spotify_followers != null ? fmtN(a.spotify_followers) : "—"}</td></tr>
+        <tr><td style="color:#555;padding:3px 0">Instagram followers</td><td style="color:#bbb">${a.instagram_followers != null ? fmtN(a.instagram_followers) : "—"}</td></tr>
+        <tr><td style="color:#555;padding:3px 0">Instagram engagement</td><td style="color:#bbb">${a.instagram_engagement != null ? (a.instagram_engagement * 100).toFixed(2) + "%" : "—"}</td></tr>
+        <tr><td style="color:#555;padding:3px 0">YouTube subscribers</td><td style="color:#bbb">${a.youtube_subscribers != null ? fmtN(a.youtube_subscribers) : "—"}</td></tr>
+        <tr><td style="color:#555;padding:3px 0">Platform score</td><td style="color:#bbb">${a.platform_score||"—"}</td></tr>
+        <tr><td style="color:#555;padding:3px 0">Signing urgency</td><td style="color:${{"immediate":"#ff3d3d","this-quarter":"#f0a500","monitor":"#888"}[a.signing_urgency]||"#888"};font-weight:700">${(a.signing_urgency||"—").toUpperCase()}</td></tr>
+        ` : ""}
       </table>
       <div style="margin-top:14px;font-size:12px">
         <div style="color:#c8ff00;font-size:10px;letter-spacing:1px;text-transform:uppercase;margin-bottom:6px">A&R Pitch</div>
@@ -143,7 +293,8 @@ function buildEmailHtml(artists) {
       </div>
       <div style="margin-top:14px;font-size:12px">
         ${a.tiktok_official_link ? `<a href="${a.tiktok_official_link}" style="color:#c8ff00;margin-right:12px">↗ TikTok Sound</a>` : ""}
-        ${a.spotify_link ? `<a href="${a.spotify_link}" style="color:#1db954">↗ Spotify Track</a>` : ""}
+        ${a.spotify_link ? `<a href="${a.spotify_link}" style="color:#1db954;margin-right:12px">↗ Spotify Track</a>` : ""}
+        ${a.cm_artist_url ? `<a href="${a.cm_artist_url}" style="color:#00a9ff">↗ Chartmetric Profile</a>` : ""}
       </div>
     </div>`).join("");
 
@@ -380,6 +531,194 @@ app.post("/analyze", async (req, res) => {
     }));
   }
   res.json({ results: results });
+});
+
+// ── POST /deep-scan ───────────────────────────────────────────────────────────
+// Full server-side pipeline: Chartex scan → Chartmetric enrichment → Claude analysis
+app.post("/deep-scan", async (req, res) => {
+  if (!process.env.CHARTEX_APP_ID)             return res.status(500).json({ error: "CHARTEX_APP_ID not set" });
+  if (!process.env.CHARTMETRIC_REFRESH_TOKEN)  return res.status(500).json({ error: "CHARTMETRIC_REFRESH_TOKEN not set" });
+  if (!process.env.ANTHROPIC_API_KEY)          return res.status(500).json({ error: "ANTHROPIC_API_KEY not set" });
+
+  const limit = Math.min(parseInt((req.body || {}).limit) || 20, 100);
+  console.log("[deep-scan] limit=" + limit);
+
+  // ── Phase 1: Chartex scan (same logic as /scan) ──────────────────────────
+  let sounds;
+  try {
+    const data = await cxGet("/tiktok-sounds/", {
+      sort_by: "tiktok_last_7_days_video_count", country_codes: "US",
+      limit: 100, page: 1, label_categories: "OTHERS",
+    });
+    const candidates = (data.data && data.data.items) || [];
+    console.log("[deep-scan] " + candidates.length + " candidates from Chartex");
+
+    const withRealCounts = await Promise.all(candidates.map(async function(s) {
+      try {
+        const stats = await cxGet("/tiktok-sounds/" + s.tiktok_sound_id + "/stats/tiktok-video-counts/", { mode: "total" });
+        const realTotal = (stats.data && stats.data.tiktok_total_video_count) || 0;
+        return Object.assign({}, s, { real_total_creates: realTotal });
+      } catch (e) {
+        return Object.assign({}, s, { real_total_creates: s.tiktok_total_video_count || 0 });
+      }
+    }));
+
+    sounds = withRealCounts
+      .filter(s => s.real_total_creates > 0 && s.real_total_creates <= 50000)
+      .slice(0, limit);
+
+    console.log("[deep-scan] " + sounds.length + " sounds after 50k filter");
+  } catch (e) { return res.status(502).json({ error: "Chartex: " + e.message }); }
+
+  // Enrich with influencer stats (batched 5 at a time, same as /scan)
+  const enriched = [];
+  for (let i = 0; i < sounds.length; i += 5) {
+    const rows = await Promise.all(sounds.slice(i, i + 5).map(async function(s) {
+      let inf = null;
+      try { inf = await cxGet("/tiktok-sounds/" + s.tiktok_sound_id + "/influencer-statistics/", { limit: 5 }); } catch (e) {}
+      return {
+        tiktok_sound_id:                s.tiktok_sound_id,
+        author_name:                    s.tiktok_sound_creator_name || s.tiktok_sound_creator_username || "",
+        title:                          s.tiktok_name_of_sound || "",
+        tiktok_last_7_days_video_count: s.tiktok_last_7_days_video_count || 0,
+        tiktok_total_video_count:       s.real_total_creates || s.tiktok_total_video_count || 0,
+        label_name:                     s.label_name || "",
+        artists:                        s.artists || "",
+        song_name:                      s.song_name || "",
+        tiktok_official_link:           s.tiktok_official_link || "",
+        spotify_id:                     s.spotify_id || "",
+        total_video_views:              s.total_video_views || 0,
+        total_video_likes:              s.total_video_likes || 0,
+        top_influencers: inf && inf.data && inf.data.items ? inf.data.items.slice(0, 3) : [],
+      };
+    }));
+    enriched.push(...rows);
+  }
+
+  // Skip previously seen
+  const seen = loadSeen();
+  const unseen = enriched.filter(s => !seen.has(s.tiktok_sound_id));
+  console.log("[deep-scan] " + enriched.length + " total → " + unseen.length + " unseen");
+
+  // ── Phase 2: Chartmetric enrichment (batched 3 at a time) ────────────────
+  console.log("[deep-scan] enriching " + unseen.length + " artists with Chartmetric...");
+  const cmEnriched = [];
+  for (let i = 0; i < unseen.length; i += 3) {
+    const batch = await Promise.all(unseen.slice(i, i + 3).map(async function(s) {
+      console.log("[deep-scan] cm enriching: " + s.author_name);
+      const cm = await enrichWithChartmetric(s.author_name);
+      return Object.assign({}, s, cm);
+    }));
+    cmEnriched.push(...batch);
+  }
+
+  // ── Phase 3: Claude analysis with enriched multi-platform prompt ──────────
+  console.log("[deep-scan] running Claude analysis on " + cmEnriched.length + " artists...");
+  const results = [];
+
+  for (const s of cmEnriched) {
+    const inf   = s.top_influencers && s.top_influencers.length ? JSON.stringify(s.top_influencers) : "none";
+    const label = s.label_name || "";
+
+    const preFilter = preFilterLabel(label);
+    if (preFilter === "signed") {
+      console.log("[deep-scan] PRE-FILTER signed: " + s.author_name + " | label=" + label);
+      results.push(Object.assign({}, s, {
+        is_unsigned: false, label_assessment: label + " (pre-filtered)",
+        niche: "", pitch: "", tiktok_momentum: "unknown", algo_notes: "",
+        platform_score: null, signing_urgency: null,
+        spotify_link: s.spotify_id ? "https://open.spotify.com/track/" + s.spotify_id : null,
+      }));
+      continue;
+    }
+
+    // Build cross-platform data section for prompt
+    const cmLines =
+      "  Chartmetric Artist URL: " + (s.cm_artist_url || (s.cm_error ? "not found (" + s.cm_error + ")" : "not found")) + "\n" +
+      "  Chartmetric label: " + (s.label_from_cm || "none") + "\n" +
+      "  Spotify monthly listeners: " + (s.spotify_monthly_listeners != null ? fmt(s.spotify_monthly_listeners) : "n/a") + "\n" +
+      "  Spotify followers: " + (s.spotify_followers != null ? fmt(s.spotify_followers) : "n/a") + "\n" +
+      "  Spotify popularity score: " + (s.spotify_popularity != null ? s.spotify_popularity + "/100" : "n/a") + "\n" +
+      "  Instagram followers: " + (s.instagram_followers != null ? fmt(s.instagram_followers) : "n/a") + "\n" +
+      "  Instagram engagement rate: " + (s.instagram_engagement != null ? (s.instagram_engagement * 100).toFixed(2) + "%" : "n/a") + "\n" +
+      "  YouTube subscribers: " + (s.youtube_subscribers != null ? fmt(s.youtube_subscribers) : "n/a") + "\n" +
+      "  YouTube total views: " + (s.youtube_views != null ? fmt(s.youtube_views) : "n/a") + "\n" +
+      "  TikTok followers (Chartmetric): " + (s.tiktok_cm_followers != null ? fmt(s.tiktok_cm_followers) : "n/a");
+
+    const prompt =
+      "You are a senior A&R scout at an independent label. Analyze this multi-platform artist data.\n\n" +
+      "TIKTOK DATA (Chartex):\n" +
+      "  Sound: \"" + s.title + "\"\n" +
+      "  Creator: " + s.author_name + "\n" +
+      "  Artists credited by Chartex: " + (s.artists || "none listed") + "\n" +
+      "  Label listed by Chartex: " + (label || "none") + (preFilter === "unsigned" ? " [DISTRIBUTOR — artist is unsigned]" : "") + "\n" +
+      "  New TikTok videos this week: " + fmt(s.tiktok_last_7_days_video_count) + "\n" +
+      "  Total TikTok videos all time: " + fmt(s.tiktok_total_video_count) + "\n" +
+      "  Total video views: " + fmt(s.total_video_views) + "\n" +
+      "  Total video likes: " + fmt(s.total_video_likes) + "\n" +
+      "  Spotify track ID exists: " + (s.spotify_id ? "yes (" + s.spotify_id + ")" : "no") + "\n" +
+      "  Top influencers using sound: " + inf + "\n\n" +
+      "CROSS-PLATFORM DATA (Chartmetric):\n" + cmLines + "\n\n" +
+      "SIGNING STATUS RULES:\n" +
+      "1. If you KNOW this artist is signed to a major or notable indie from your training data → is_unsigned: false\n" +
+      "2. Chartex label matches a known major/notable indie → is_unsigned: false. Known: " + SIGNED + "\n" +
+      "3. Chartex label is a distributor only → is_unsigned: true. Distributors: " + DISTROS + "\n" +
+      "4. Unknown label AND you don't recognize the artist → is_unsigned: true\n" +
+      "5. Not on Spotify → likely unsigned → is_unsigned: true\n" +
+      "6. Uncertain → is_unsigned: true\n\n" +
+      "PLATFORM SCORE (only if is_unsigned: true):\n" +
+      "  strong = established cross-platform presence (100K+ on 2+ platforms)\n" +
+      "  moderate = growing on 1-2 platforms (10K-100K range)\n" +
+      "  emerging = TikTok-first, minimal presence elsewhere (under 10K everywhere else)\n\n" +
+      "SIGNING URGENCY (only if is_unsigned: true):\n" +
+      "  immediate = trajectory + platform spread signals deal leverage closes in <90 days\n" +
+      "  this-quarter = strong signal, act in 1-3 months\n" +
+      "  monitor = early, watch for 60-90 days before approaching\n\n" +
+      "PITCH REQUIREMENTS (only if is_unsigned: true):\n" +
+      "Write 3-4 sentences. Every sentence must contain a specific data point:\n" +
+      "  Sentence 1: TikTok weekly velocity + what the organic scale signals for market timing\n" +
+      "  Sentence 2: Cross-platform reach — reference at least one Chartmetric stat (Spotify listeners, Instagram followers, etc.)\n" +
+      "  Sentence 3: Specific subgenre + why this niche has commercial upside right now\n" +
+      "  Sentence 4: The signing window — what happens to deal leverage if you wait 3-6 months\n" +
+      "BANNED phrases: 'has shown', 'worth monitoring', 'is trending', 'impressive', '[name] is [verb]ing'\n\n" +
+      "ALGO NOTES (only if is_unsigned: true):\n" +
+      "  Sentence 1: Name 2-3 specific Spotify editorial playlists realistic for this exact subgenre\n" +
+      "  Sentence 2: TikTok-to-Spotify conversion opportunity specific to this genre's listener behavior\n\n" +
+      "Reply ONLY with this JSON, no markdown:\n" +
+      "{\"is_unsigned\":true,\"label_assessment\":\"exact label or reason unsigned\",\"niche\":\"2-4 specific subgenre tags\",\"pitch\":\"3-4 data-driven sentences\",\"tiktok_momentum\":\"hot or growing or stable or declining\",\"algo_notes\":\"2 specific sentences\",\"platform_score\":\"strong or moderate or emerging\",\"signing_urgency\":\"immediate or this-quarter or monitor\"}";
+
+    await new Promise(r => setTimeout(r, 1000));
+
+    let analysis;
+    try {
+      const raw   = await askClaude(prompt);
+      const clean = raw.replace(/```json|```/g, "").trim();
+      const match = clean.match(/\{[\s\S]*\}/);
+      if (!match) throw new Error("No JSON: " + clean.slice(0, 200));
+      analysis = JSON.parse(match[0]);
+      if (typeof analysis.is_unsigned !== "boolean") throw new Error("is_unsigned not boolean");
+    } catch (e) {
+      console.error("[deep-scan] Claude FAILED for " + s.author_name + ": " + e.message);
+      analysis = {
+        is_unsigned: null, label_assessment: "Error: " + e.message,
+        niche: "unknown", pitch: "Analysis failed.", tiktok_momentum: "unknown",
+        algo_notes: "Manual review required.", platform_score: null, signing_urgency: null,
+      };
+    }
+
+    console.log("[deep-scan] " + s.author_name + " | unsigned=" + analysis.is_unsigned + " | urgency=" + analysis.signing_urgency + " | cm_id=" + (s.cm_artist_id || "n/a"));
+    await new Promise(r => setTimeout(r, 1000));
+
+    results.push(Object.assign({}, s, analysis, {
+      spotify_link: s.spotify_id ? "https://open.spotify.com/track/" + s.spotify_id : null,
+      deep_scan: true,
+    }));
+  }
+
+  // Return only unsigned artists
+  const unsigned = results.filter(a => a.is_unsigned !== false);
+  console.log("[deep-scan] done — " + unsigned.length + " unsigned artists found");
+  res.json({ artists: unsigned, total_scanned: cmEnriched.length });
 });
 
 app.get("*", (req, res) => {
