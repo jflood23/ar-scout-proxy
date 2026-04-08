@@ -228,7 +228,7 @@ app.get("/chartmetric/artist", async (req, res) => {
 });
 
 app.get("/version", (_, res) => res.json({
-  version: "v34-cm-api-fix",
+  version: "v35-scan-fix",
   anthropic_key_set:    !!process.env.ANTHROPIC_API_KEY,
   resend_key_set:       !!process.env.RESEND_API_KEY,
   chartex_key_set:      !!process.env.CHARTEX_APP_ID,
@@ -402,15 +402,16 @@ app.post("/scan", async (req, res) => {
       try {
         const stats = await cxGet("/tiktok-sounds/" + s.tiktok_sound_id + "/stats/tiktok-video-counts/", { mode: "total" });
         const realTotal = (stats.data && stats.data.tiktok_total_video_count) || 0;
-        return Object.assign({}, s, { real_total_creates: realTotal });
+        return Object.assign({}, s, { real_total_creates: realTotal, stats_ok: realTotal > 0 });
       } catch (e) {
-        return Object.assign({}, s, { real_total_creates: s.tiktok_total_video_count || 0 });
+        // Stats endpoint failed — use list count if available, else include sound anyway (let Claude decide)
+        return Object.assign({}, s, { real_total_creates: s.tiktok_total_video_count || 0, stats_ok: false });
       }
     }));
 
-    // Filter: under 50k all-time creates
+    // Filter: under 50k all-time creates. If stats failed (stats_ok=false), include the sound anyway.
     sounds = withRealCounts
-      .filter(s => s.real_total_creates > 0 && s.real_total_creates <= 50000)
+      .filter(s => !s.stats_ok || s.real_total_creates <= 50000)
       .slice(0, limit);
 
     console.log("[scan] " + sounds.length + " sounds after 50k all-time creates filter");
@@ -557,14 +558,14 @@ app.post("/deep-scan", async (req, res) => {
       try {
         const stats = await cxGet("/tiktok-sounds/" + s.tiktok_sound_id + "/stats/tiktok-video-counts/", { mode: "total" });
         const realTotal = (stats.data && stats.data.tiktok_total_video_count) || 0;
-        return Object.assign({}, s, { real_total_creates: realTotal });
+        return Object.assign({}, s, { real_total_creates: realTotal, stats_ok: realTotal > 0 });
       } catch (e) {
-        return Object.assign({}, s, { real_total_creates: s.tiktok_total_video_count || 0 });
+        return Object.assign({}, s, { real_total_creates: s.tiktok_total_video_count || 0, stats_ok: false });
       }
     }));
 
     sounds = withRealCounts
-      .filter(s => s.real_total_creates > 0 && s.real_total_creates <= 50000)
+      .filter(s => !s.stats_ok || s.real_total_creates <= 50000)
       .slice(0, limit);
 
     console.log("[deep-scan] " + sounds.length + " sounds after 50k filter");
