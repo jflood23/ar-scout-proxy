@@ -66,10 +66,10 @@ async function askClaude(prompt, attempt) {
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
-    body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1200, messages: [{ role: "user", content: prompt }] }),
+    body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1200, messages: [{ role: "user", content: prompt }] }),
   });
   const d = await res.json();
-  if (res.status === 529 && attempt <= 4) {
+  if ((res.status === 529 || res.status === 500) && attempt <= 4) {
     const wait = Math.pow(2, attempt) * 1000; // 2s, 4s, 8s, 16s
     console.log("[claude] 529 overloaded — retrying in " + wait + "ms (attempt " + attempt + ")");
     await new Promise(r => setTimeout(r, wait));
